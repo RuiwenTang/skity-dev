@@ -84,6 +84,29 @@ def pack_all_frameworks(version_suffix: str):
     cmake_build_and_install('out/ios_simulator_framework_arm64', 'out/ios_simulator_install_arm64', '11.0', 'arm64', 'iphonesimulator', version_suffix)
     pass
 
+def pack_zip_bundle():
+    # delete out/skity.framework.zip if exists
+    if os.path.exists('out/skity.framework.zip'):
+        subprocess.check_call(['rm', '-rf', 'out/skity.framework.zip'])
+    # delete out/framework_pack if exists
+    if os.path.exists('out/framework_pack'):
+        subprocess.check_call(['rm', '-rf', 'out/framework_pack'])
+
+    # create out/framework_pack
+    os.makedirs('out/framework_pack')
+
+    # copy skity.xcframework to out/framework_pack
+    subprocess.check_call(['cp', '-R', 'out/skity.xcframework', 'out/framework_pack'])
+    # we also copy LICENSE to out/framework_pack
+    subprocess.check_call(['cp', 'LICENSE', 'out/framework_pack'])
+
+    # pack out/framework_pack to out/skity.framework.zip
+    subprocess.check_call(['zip', '-r', '../skity.framework.zip', 'LICENSE', 'skity.xcframework'], cwd='out/framework_pack')
+
+    # delete out/framework_pack
+    subprocess.check_call(['rm', '-rf', 'out/framework_pack'])
+    pass
+
 
 def main(version_suffix: str):
     pack_all_frameworks(version_suffix)
@@ -124,6 +147,8 @@ def main(version_suffix: str):
                            '-framework', 'out/osx_install/skity.framework',
                            '-framework', 'out/ios_simulator_install/skity.framework',
                            '-output', 'out/skity.xcframework'])
+
+    pack_zip_bundle()
 
 
 if __name__ == '__main__':
