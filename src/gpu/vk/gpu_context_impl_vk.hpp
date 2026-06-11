@@ -7,6 +7,8 @@
 
 #include <memory>
 
+#include <skity/gpu/gpu_context_vk.hpp>
+
 #include "src/gpu/gpu_context_impl.hpp"
 
 namespace skity {
@@ -29,6 +31,11 @@ class GPUContextVK : public GPUContextImpl {
   std::unique_ptr<GPUPresenter> CreatePresenter(
       GPUPresenterDescriptor* desc) override;
 
+  std::shared_ptr<GPUSemaphore> CreateSemaphore() override;
+
+  void ImportSemaphore(GPUSemaphore* semaphore,
+                       const GPUSemaphoreImportInfo& info) override;
+
   const VulkanContextState* GetState() const { return state_.get(); }
 
  protected:
@@ -47,6 +54,12 @@ class GPUContextVK : public GPUContextImpl {
 
  private:
   std::shared_ptr<VulkanContextState> state_;
+
+#if defined(SKITY_ANDROID)
+  std::shared_ptr<GPUTexture> OnWrapAHardwareBuffer(
+      ::AHardwareBuffer* ahb, uint32_t width, uint32_t height,
+      ReleaseCallback callback, ReleaseUserData user_data);
+#endif
 };
 
 }  // namespace skity

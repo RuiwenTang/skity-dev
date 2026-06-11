@@ -12,11 +12,17 @@
 #include "src/gpu/vk/gpu_buffer_vk.hpp"
 #include "src/gpu/vk/gpu_device_vk.hpp"
 #include "src/gpu/vk/gpu_presenter_vk.hpp"
+#include "src/gpu/vk/gpu_semaphore_vk.hpp"
 #include "src/gpu/vk/gpu_surface_vk.hpp"
 #include "src/gpu/vk/gpu_texture_vk.hpp"
 #include "src/gpu/vk/vulkan_context_state.hpp"
 #include "src/gpu/vk/vulkan_proc_table.hpp"
 #include "src/logging.hpp"
+
+#if defined(SKITY_ANDROID)
+#include <android/hardware_buffer.h>
+#include "src/gpu/vk/gpu_external_texture_ahb.hpp"
+#endif
 
 // put VMA_IMPLEMENTATION here
 #ifndef VMA_IMPLEMENTATION
@@ -466,6 +472,10 @@ bool LoadVulkanDeviceFns(PFN_vkGetDeviceProcAddr get_device_proc_addr,
       get_device_proc_addr(device, "vkBindBufferMemory"));
   fns->vkBindImageMemory = reinterpret_cast<PFN_vkBindImageMemory>(
       get_device_proc_addr(device, "vkBindImageMemory"));
+  fns->vkCreateSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(
+      get_device_proc_addr(device, "vkCreateSemaphore"));
+  fns->vkDestroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(
+      get_device_proc_addr(device, "vkDestroySemaphore"));
   fns->vkGetBufferMemoryRequirements =
       reinterpret_cast<PFN_vkGetBufferMemoryRequirements>(
           get_device_proc_addr(device, "vkGetBufferMemoryRequirements"));
@@ -599,6 +609,15 @@ bool LoadVulkanDeviceFns(PFN_vkGetDeviceProcAddr get_device_proc_addr,
   fns->vkSetDebugUtilsObjectNameEXT =
       reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
           get_device_proc_addr(device, "vkSetDebugUtilsObjectNameEXT"));
+#if defined(SKITY_ANDROID)
+  fns->vkGetAndroidHardwareBufferPropertiesANDROID =
+      reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
+          get_device_proc_addr(device,
+                               "vkGetAndroidHardwareBufferPropertiesANDROID"));
+  fns->vkImportSemaphoreFdKHR =
+      reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+          get_device_proc_addr(device, "vkImportSemaphoreFdKHR"));
+#endif
 #if defined(SKITY_VK_DEBUG_RUNTIME)
   fns->vkCmdBeginDebugUtilsLabelEXT =
       reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
@@ -625,6 +644,7 @@ bool LoadVulkanDeviceFns(PFN_vkGetDeviceProcAddr get_device_proc_addr,
       fns->vkFlushMappedMemoryRanges == nullptr ||
       fns->vkInvalidateMappedMemoryRanges == nullptr ||
       fns->vkBindBufferMemory == nullptr || fns->vkBindImageMemory == nullptr ||
+      fns->vkCreateSemaphore == nullptr || fns->vkDestroySemaphore == nullptr ||
       fns->vkGetBufferMemoryRequirements == nullptr ||
       fns->vkGetImageMemoryRequirements == nullptr ||
       fns->vkCreateBuffer == nullptr || fns->vkDestroyBuffer == nullptr ||
@@ -877,6 +897,57 @@ std::unique_ptr<GPUPresenter> GPUContextVK::CreatePresenter(
   return presenter;
 }
 
+std::shared_ptr<GPUSemaphore> GPUContextVK::CreateSemaphore() {
+  VkSemaphoreCreateInfo create_info = {};
+  create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+  VkSemaphore sem = VK_NULL_HANDLE;
+  auto result = state_->DeviceFns().vkCreateSemaphore(
+      state_->GetLogicalDevice(), &create_info, nullptr, &sem);
+  if (result != VK_SUCCESS) {
+    LOGE("GPUContextVK::CreateSemaphore: vkCreateSemaphore failed: {}",
+         static_cast<int32_t>(result));
+    return nullptr;
+  }
+
+  return std::shared_ptr<GPUSemaphoreVK>(new GPUSemaphoreVK(state_, sem));
+}
+
+void GPUContextVK::ImportSemaphore(GPUSemaphore* semaphore,
+                                   const GPUSemaphoreImportInfo& info) {
+  if (semaphore == nullptr || info.backend != GPUBackendType::kVulkan) {
+    return;
+  }
+
+  auto* vk_sem = static_cast<GPUSemaphoreVK*>(semaphore);
+  const auto& vk_info = static_cast<const GPUSemaphoreImportInfoVK&>(info);
+
+#if defined(SKITY_ANDROID)
+  if (state_->DeviceFns().vkImportSemaphoreFdKHR == nullptr) {
+    LOGE("GPUContextVK::ImportSemaphore: vkImportSemaphoreFdKHR not available");
+    return;
+  }
+
+  VkImportSemaphoreFdInfoKHR import_info = {};
+  import_info.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR;
+  import_info.semaphore = vk_sem->GetVkSemaphore();
+  import_info.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
+  import_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+  import_info.fd = vk_info.sync_fd;  // ownership transferred
+
+  VkResult result = state_->DeviceFns().vkImportSemaphoreFdKHR(
+      state_->GetLogicalDevice(), &import_info);
+  if (result != VK_SUCCESS) {
+    LOGE("GPUContextVK::ImportSemaphore: vkImportSemaphoreFdKHR failed: {}",
+         static_cast<int32_t>(result));
+  }
+#else
+  (void)vk_sem;
+  (void)vk_info;
+  LOGE("GPUContextVK::ImportSemaphore: not supported on this platform");
+#endif
+}
+
 std::unique_ptr<GPUDevice> GPUContextVK::CreateGPUDevice() {
   return std::make_unique<GPUDeviceVK>(state_);
 }
@@ -889,6 +960,22 @@ std::shared_ptr<GPUTexture> GPUContextVK::OnWrapTexture(
   }
 
   auto* vk_info = static_cast<GPUBackendTextureInfoVK*>(info);
+
+#if defined(SKITY_ANDROID)
+  // Walk the ext chain to find AHB extension
+  GPUBackendTextureExtInfoAHB* ahb_ext = nullptr;
+  for (auto* e = vk_info->ext; e != nullptr; e = e->next) {
+    if (e->type == GPUBackendTextureExtType::kAndroidHardwareBuffer) {
+      ahb_ext = static_cast<GPUBackendTextureExtInfoAHB*>(e);
+      break;
+    }
+  }
+  if (ahb_ext && ahb_ext->hardware_buffer) {
+    return OnWrapAHardwareBuffer(ahb_ext->hardware_buffer,
+                                 vk_info->width, vk_info->height, callback,
+                                 user_data);
+  }
+#endif
 
   if (vk_info->image == VK_NULL_HANDLE ||
       vk_info->image_view == VK_NULL_HANDLE ||
@@ -1096,5 +1183,234 @@ std::unique_ptr<GPUContext> CreateGPUContextVK(
        reinterpret_cast<void*>(get_instance_proc_addr));
   return CreateGPUContextVK(&info);
 }
+
+#if defined(SKITY_ANDROID)
+std::shared_ptr<GPUTexture> GPUContextVK::OnWrapAHardwareBuffer(
+    ::AHardwareBuffer* ahb, uint32_t width, uint32_t height,
+    ReleaseCallback callback, ReleaseUserData user_data) {
+  if (ahb == nullptr) {
+    LOGE("GPUContextVK::OnWrapAHardwareBuffer: null AHardwareBuffer");
+    return {};
+  }
+
+  // Check AHB extension is available
+  if (!state_->HasEnabledDeviceExtension(
+          VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME)) {
+    LOGE(
+        "GPUContextVK::OnWrapAHardwareBuffer: "
+        "VK_ANDROID_external_memory_android_hardware_buffer not enabled");
+    return {};
+  }
+
+  const auto& fns = state_->DeviceFns();
+  if (fns.vkGetAndroidHardwareBufferPropertiesANDROID == nullptr) {
+    LOGE(
+        "GPUContextVK::OnWrapAHardwareBuffer: "
+        "vkGetAndroidHardwareBufferPropertiesANDROID not loaded");
+    return {};
+  }
+
+  VkDevice device = state_->GetLogicalDevice();
+
+  // Step 1: Describe AHardwareBuffer
+  if (!state_->IsAHardwareBufferAvailable()) {
+    LOGE("GPUContextVK::OnWrapAHardwareBuffer: AHardwareBuffer API not available (requires API 26+)");
+    return {};
+  }
+
+  AHardwareBuffer_Desc ahb_desc = {};
+  state_->GetAHardwareBufferDescribeFn()(ahb, &ahb_desc);
+
+  if (width == 0) {
+    width = ahb_desc.width;
+  }
+  if (height == 0) {
+    height = ahb_desc.height;
+  }
+
+  // Step 2: Map AHB format to VkFormat
+  VkFormat vk_format = VK_FORMAT_UNDEFINED;
+  switch (ahb_desc.format) {
+    case AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM:
+      vk_format = VK_FORMAT_R8G8B8A8_UNORM;
+      break;
+    case AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM:
+      vk_format = VK_FORMAT_R8G8B8A8_UNORM;
+      break;
+    case AHARDWAREBUFFER_FORMAT_R8G8B8_UNORM:
+      vk_format = VK_FORMAT_R8G8B8_UNORM;
+      break;
+    case AHARDWAREBUFFER_FORMAT_R5G6B5_UNORM:
+      vk_format = VK_FORMAT_R5G6B5_UNORM_PACK16;
+      break;
+    default:
+      LOGE(
+          "GPUContextVK::OnWrapAHardwareBuffer: unsupported AHB format {}",
+          static_cast<int32_t>(ahb_desc.format));
+      return {};
+  }
+
+  GPUTextureFormat gpu_format = ToGPUTextureFormat(vk_format);
+  if (gpu_format == GPUTextureFormat::kInvalid) {
+    LOGE(
+        "GPUContextVK::OnWrapAHardwareBuffer: unsupported VkFormat {}",
+        static_cast<int32_t>(vk_format));
+    return {};
+  }
+
+  // Step 3: Query Vulkan memory properties from AHB
+  VkAndroidHardwareBufferPropertiesANDROID ahb_props = {};
+  ahb_props.sType =
+      VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
+  VkResult result =
+      fns.vkGetAndroidHardwareBufferPropertiesANDROID(device, ahb, &ahb_props);
+  if (result != VK_SUCCESS) {
+    LOGE(
+        "GPUContextVK::OnWrapAHardwareBuffer: "
+        "vkGetAndroidHardwareBufferPropertiesANDROID failed: {}",
+        static_cast<int32_t>(result));
+    return {};
+  }
+
+  // Step 4: Create VkImage with external memory
+  VkExternalMemoryImageCreateInfo external_mem_info = {};
+  external_mem_info.sType =
+      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+  external_mem_info.handleTypes =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+
+  VkImageCreateInfo image_info = {};
+  image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  image_info.pNext = &external_mem_info;
+  image_info.imageType = VK_IMAGE_TYPE_2D;
+  image_info.format = vk_format;
+  image_info.extent = {width, height, 1};
+  image_info.mipLevels = 1;
+  image_info.arrayLayers = 1;
+  image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+  image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  image_info.usage =
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+  VkImage image = VK_NULL_HANDLE;
+  result = fns.vkCreateImage(device, &image_info, nullptr, &image);
+  if (result != VK_SUCCESS) {
+    LOGE(
+        "GPUContextVK::OnWrapAHardwareBuffer: vkCreateImage failed: {}",
+        static_cast<int32_t>(result));
+    return {};
+  }
+
+  // Step 5: Select memory type (prefer DEVICE_LOCAL)
+  VkPhysicalDeviceMemoryProperties mem_props = {};
+  state_->InstanceFns().vkGetPhysicalDeviceMemoryProperties(
+      state_->GetPhysicalDevice(), &mem_props);
+  uint32_t memory_type_index = UINT32_MAX;
+  for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+    if ((ahb_props.memoryTypeBits & (1u << i)) != 0) {
+      memory_type_index = i;
+      if ((mem_props.memoryTypes[i].propertyFlags &
+           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+        break;
+      }
+    }
+  }
+  if (memory_type_index == UINT32_MAX) {
+    LOGE(
+        "GPUContextVK::OnWrapAHardwareBuffer: "
+        "no suitable memory type found");
+    fns.vkDestroyImage(device, image, nullptr);
+    return {};
+  }
+
+  // Step 6: Import AHB memory
+  VkImportAndroidHardwareBufferInfoANDROID import_ahb_info = {};
+  import_ahb_info.sType =
+      VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
+  import_ahb_info.buffer = ahb;
+
+  VkMemoryDedicatedAllocateInfo dedicated_info = {};
+  dedicated_info.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+  dedicated_info.pNext = &import_ahb_info;
+  dedicated_info.image = image;
+
+  VkMemoryAllocateInfo alloc_info = {};
+  alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  alloc_info.pNext = &dedicated_info;
+  alloc_info.allocationSize = ahb_props.allocationSize;
+  alloc_info.memoryTypeIndex = memory_type_index;
+
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  result = fns.vkAllocateMemory(device, &alloc_info, nullptr, &memory);
+  if (result != VK_SUCCESS) {
+    LOGE(
+        "GPUContextVK::OnWrapAHardwareBuffer: vkAllocateMemory failed: {}",
+        static_cast<int32_t>(result));
+    fns.vkDestroyImage(device, image, nullptr);
+    return {};
+  }
+
+  // Step 7: Bind image memory
+  result = fns.vkBindImageMemory(device, image, memory, 0);
+  if (result != VK_SUCCESS) {
+    LOGE(
+        "GPUContextVK::OnWrapAHardwareBuffer: vkBindImageMemory failed: {}",
+        static_cast<int32_t>(result));
+    fns.vkFreeMemory(device, memory, nullptr);
+    fns.vkDestroyImage(device, image, nullptr);
+    return {};
+  }
+
+  // Step 8: Create ImageView
+  VkImageViewCreateInfo view_info = {};
+  view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  view_info.image = image;
+  view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view_info.format = vk_format;
+  view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  view_info.subresourceRange.baseMipLevel = 0;
+  view_info.subresourceRange.levelCount = 1;
+  view_info.subresourceRange.baseArrayLayer = 0;
+  view_info.subresourceRange.layerCount = 1;
+
+  VkImageView image_view = VK_NULL_HANDLE;
+  result = fns.vkCreateImageView(device, &view_info, nullptr, &image_view);
+  if (result != VK_SUCCESS) {
+    LOGE(
+        "GPUContextVK::OnWrapAHardwareBuffer: vkCreateImageView failed: {}",
+        static_cast<int32_t>(result));
+    fns.vkFreeMemory(device, memory, nullptr);
+    fns.vkDestroyImage(device, image, nullptr);
+    return {};
+  }
+
+  // Step 9: Wrap into GPUExternalTextureAHB
+  GPUTextureDescriptor desc = {};
+  desc.width = width;
+  desc.height = height;
+  desc.mip_level_count = 1;
+  desc.sample_count = 1;
+  desc.format = gpu_format;
+  desc.usage = static_cast<GPUTextureUsageMask>(GPUTextureUsage::kTextureBinding);
+  desc.storage_mode = GPUTextureStorageMode::kPrivate;
+
+  auto texture = GPUExternalTextureAHB::Make(
+      state_, desc, image, memory, image_view,
+      VK_IMAGE_LAYOUT_UNDEFINED,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, vk_format);
+  if (texture == nullptr) {
+    LOGE("GPUContextVK::OnWrapAHardwareBuffer: GPUExternalTextureAHB::Make failed");
+    fns.vkDestroyImageView(device, image_view, nullptr);
+    fns.vkFreeMemory(device, memory, nullptr);
+    fns.vkDestroyImage(device, image, nullptr);
+    return {};
+  }
+
+  texture->SetRelease(callback, user_data);
+  return texture;
+}
+#endif  // defined(SKITY_ANDROID)
 
 }  // namespace skity

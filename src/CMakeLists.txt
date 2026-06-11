@@ -500,6 +500,8 @@ if(${SKITY_HW_RENDERER})
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_context_impl_vk.cc
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_context_impl_vk.hpp
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_native_window_vk.cc
+      ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_semaphore_vk.cc
+      ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_semaphore_vk.hpp
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_render_pass_vk.cc
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_render_pass_vk.hpp
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_render_pipeline_vk.cc
@@ -512,6 +514,8 @@ if(${SKITY_HW_RENDERER})
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_surface_vk.hpp
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_texture_vk.cc
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_texture_vk.hpp
+      ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_external_texture_ahb.cc
+      ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/gpu_external_texture_ahb.hpp
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/vulkan_debug_runtime_state.hpp
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/vulkan_render_pass_cache.cc
       ${CMAKE_CURRENT_LIST_DIR}/gpu/vk/vulkan_render_pass_cache.hpp

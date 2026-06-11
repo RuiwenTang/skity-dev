@@ -62,6 +62,13 @@ class GPUContextImpl : public GPUContext {
   std::shared_ptr<Image> MakeSnapshot(
       std::unique_ptr<GPURenderTarget> render_target) override;
 
+  std::shared_ptr<GPUSemaphore> CreateSemaphore() override {
+    return nullptr;
+  }
+
+  void ImportSemaphore(GPUSemaphore* semaphore,
+                       const GPUSemaphoreImportInfo& info) override {}
+
   std::shared_ptr<Data> ReadPixels(const std::shared_ptr<GPUTexture>& texture);
 
  protected:

@@ -11,6 +11,7 @@
 
 #include "src/gpu/gpu_surface_impl.hpp"
 #include "src/gpu/vk/gpu_command_buffer_vk.hpp"
+#include "src/gpu/vk/gpu_semaphore_vk.hpp"
 
 namespace skity {
 
@@ -35,8 +36,10 @@ class GPUSurfaceVK : public GPUSurfaceImpl {
         format_(format),
         has_submit_info_(sync_info != nullptr) {
     if (sync_info != nullptr) {
-      submit_info_.wait_semaphore = sync_info->wait_semaphore;
-      submit_info_.wait_dst_stage_mask = sync_info->wait_dst_stage_mask;
+      if (sync_info->wait_semaphore != VK_NULL_HANDLE) {
+        submit_info_.AddWaitSemaphore(sync_info->wait_semaphore,
+                                      sync_info->wait_dst_stage_mask);
+      }
       submit_info_.signal_semaphore = sync_info->signal_semaphore;
       submit_info_.signal_fence = sync_info->signal_fence;
     }
@@ -50,6 +53,9 @@ class GPUSurfaceVK : public GPUSurfaceImpl {
 
   const GPUSubmitInfo* GetSubmitInfo() const override;
 
+  void AddExternalWaitSemaphore(
+      std::shared_ptr<GPUSemaphore> semaphore) override;
+
   void SetPresentInfo(const PresentInfo& present_info) {
     has_present_info_ = true;
     present_info_ = present_info;
@@ -62,7 +68,7 @@ class GPUSurfaceVK : public GPUSurfaceImpl {
  protected:
   HWRootLayer* OnBeginNextFrame(bool clear) override;
 
-  void OnFlush() override {}
+  void OnFlush() override;
 
  private:
   uint32_t target_width_ = 0;
@@ -73,6 +79,7 @@ class GPUSurfaceVK : public GPUSurfaceImpl {
   GPUSubmitInfoVK submit_info_ = {};
   bool has_present_info_ = false;
   PresentInfo present_info_ = {};
+  std::vector<std::shared_ptr<GPUSemaphore>> external_semaphores_;
 };
 
 }  // namespace skity

@@ -8,9 +8,14 @@
 #include <vulkan/vulkan.h>
 
 #include <skity/gpu/gpu_context.hpp>
+#include <skity/gpu/gpu_semaphore.hpp>
 #include <skity/gpu/gpu_surface.hpp>
 #include <skity/gpu/texture.hpp>
 #include <skity/macros.hpp>
+
+#if defined(SKITY_ANDROID)
+extern "C" struct AHardwareBuffer;
+#endif
 
 namespace skity {
 
@@ -298,6 +303,36 @@ struct GPUSurfaceDescriptorVK : public GPUSurfaceDescriptor {
   const GPUSurfaceSyncInfoVK* sync_info = nullptr;
 };
 
+/**
+ * Extension type tag for the texture info extension chain.
+ * Similar to Vulkan's VkStructureType.
+ */
+enum class GPUBackendTextureExtType {
+  kAndroidHardwareBuffer,
+};
+
+/**
+ * Base extension info struct for the texture info extension chain.
+ * Similar to Vulkan's (sType, pNext) pattern.
+ * Walk the chain via `next` and check `type` to find specific extensions.
+ */
+struct GPUBackendTextureExtInfo {
+  GPUBackendTextureExtType type;
+  GPUBackendTextureExtInfo* next = nullptr;
+};
+
+#if defined(SKITY_ANDROID)
+/**
+ * Android AHardwareBuffer extension for GPUBackendTextureInfoVK.
+ * When present in the ext chain, OnWrapTexture will import the AHardwareBuffer
+ * as a Vulkan texture instead of wrapping the provided image/image_view fields.
+ * The caller retains ownership of the AHardwareBuffer.
+ */
+struct GPUBackendTextureExtInfoAHB : public GPUBackendTextureExtInfo {
+  ::AHardwareBuffer* hardware_buffer = nullptr;
+};
+#endif
+
 struct GPUBackendTextureInfoVK : public GPUBackendTextureInfo {
   /**
    * User provided Vulkan image to wrap.
@@ -341,6 +376,30 @@ struct GPUBackendTextureInfoVK : public GPUBackendTextureInfo {
    * Whether the engine owns `image_view` and should destroy it on release.
    */
   bool owns_image_view = false;
+
+  /**
+   * Pointer to an extension info chain (similar to Vulkan's pNext).
+   * Walk the chain to find platform-specific extension data.
+   */
+  GPUBackendTextureExtInfo* ext = nullptr;
+};
+
+/**
+ * Vulkan-specific import descriptor for GPUSemaphore.
+ *
+ * Supports importing a POSIX sync file descriptor (from EGLSync fence etc.)
+ * into a Vulkan semaphore via vkImportSemaphoreFdKHR.
+ *
+ * The fd ownership is transferred to the Vulkan driver.
+ */
+struct GPUSemaphoreImportInfoVK : public GPUSemaphoreImportInfo {
+  GPUSemaphoreImportInfoVK() { backend = GPUBackendType::kVulkan; }
+
+  /**
+   * POSIX sync file descriptor (e.g. from eglDupNativeFenceFDANDROID).
+   * Ownership is transferred to the GPU driver on ImportSemaphore() call.
+   */
+  int sync_fd = -1;
 };
 
 struct GPUPresenterDescriptorVK : public GPUPresenterDescriptor {
