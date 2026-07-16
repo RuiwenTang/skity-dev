@@ -1,0 +1,51 @@
+test/ut/codec/bmp_codec_test.cc
+  s_70d6d90ec29667::t_e93dd9954f7365 130-152,154-158,160,165-166,173-175
+  s_70d6d90ec29667::t_2a6ccc40901ccc 17
+  s_70d6d90ec29667::t_edb6dcb6b0ce7b 331-341
+  s_70d6d90ec29667::t_3ed2450cb8c165 426-428
+  s_70d6d90ec29667::t_9e15e57360247c 159,162-163,167-169
+  s_70d6d90ec29667::t_edfad79302449e 384-392
+  s_70d6d90ec29667::t_e216014e55c71f 1-16,35-38,41-81,87-123,129,176-219,226-231,248-267,273-278,295-314,320-325,342-361,367-383,393-424
+  s_70d6d90ec29667::t_2fd2a17542f69a 18-34,39-40
+  s_70d6d90ec29667::t_2da8f164389016 153,161,164,170-172
+  s_70d6d90ec29667::t_2e38292a4a8278 284-294
+  s_70d6d90ec29667::t_b819ff674c33e9 82-86,124-128,220-225,232-236,268-272,279-283,315-319,326-330,362-366,425
+  s_70d6d90ec29667::t_6380a3940f43a5 237-247
+module/codec/CMakeLists.txt
+  s_70d6d90ec29667::t_55e4c4f4918eeb 32-33
+module/codec/src/codec/bmp_codec.cc
+  s_70d6d90ec29667::t_c5125abe21b96e 214
+  s_70d6d90ec29667::t_5a4b2601a29264 215
+  s_70d6d90ec29667::t_d15fa1cae45809 1-173,188-213,216-311
+  s_70d6d90ec29667::t_0f22ce80ef33bf 174-187
+test/ut/CMakeLists.txt
+  s_70d6d90ec29667::t_5525e33e18d26d 92
+module/codec/src/codec/codec.cc
+  s_70d6d90ec29667::t_5483f9cc1a564f 13
+  s_70d6d90ec29667::t_ebda49b3401cfb 29
+module/codec/src/codec/bmp_codec.hpp
+  s_70d6d90ec29667::t_f8034c26e68b4b 1-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0f92f85ab6de3080abc4509439d59244e5b16466",
+  "prompts": {},
+  "humans": {
+    "h_5463ff07480f3b": {
+      "author": "RuiwenTang <tangruiwen1989@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_70d6d90ec29667": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "691178b89628fada7c7d10dc",
+        "model": "Doubao_1_6__dev"
+      },
+      "human_author": "RuiwenTang <tangruiwen1989@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
