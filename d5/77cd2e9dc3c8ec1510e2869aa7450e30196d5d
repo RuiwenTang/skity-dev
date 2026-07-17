@@ -1,0 +1,25 @@
+test/ut/CMakeLists.txt
+  s_21b967104abc42::t_87463a033de074 101
+test/ut/codec/jpeg_codec_test.cc
+  s_21b967104abc42::t_10720250dee86a 47-67
+module/codec/src/codec/jpeg_codec.cc
+  s_21b967104abc42::t_d4ceae56b2093f 16-17,39-58,126-128,130-162,166-174,176-182,184-185,189-190,192-194,197-214,216-217,219-221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d577cd2e9dc3c8ec1510e2869aa7450e30196d5d",
+  "prompts": {},
+  "sessions": {
+    "s_21b967104abc42": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "107f445d-dae0-4645-a099-dcb803519f36",
+        "model": "unknown"
+      },
+      "human_author": "RuiwenTang <tangruiwen1989@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
