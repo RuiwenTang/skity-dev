@@ -35,3 +35,9 @@ Implementations follow one-file-per-domain under `module/capi/src/` (`canvas_c.c
 Mirrored types: `skity_vec2/3/4`, `skity_point`, `skity_rect`, column-major `skity_matrix[16]`, `skity_color`, `skity_blend_mode`. Two known fidelity points when wrapping: `Paint` exposes more than the C mirror currently carries, and `Typeface` is an abstract class in C++, so its C functions must resolve through a concrete port ([[text#Typeface and Font]]).
 
 Known migration debt tracked in the two-phase plan: `SKITY_DLL` visibility leakage from the C++ side is the root cause blocking full symbol isolation, plus a list of not-yet-referenced entry points on 32-bit x86 audits.
+
+## Coverage discipline
+
+The C API face is grown by reverse lookup, not by mirroring the C++ surface: only entry points with proven callers (audited in the animax + clay repos) become ABI commitments.
+
+Shaping findings that shaped the current face: `Rect`/`Matrix` methods have only C++ callers (solution is inline-ization in the header-only layer, not C functions); `TextRun`'s proven need is the build side — callers run their own shaping ([[text#Text Stack#Shaping model]]) and inject glyph ids + positions via `skity_text_blob_create_from_glyphs`; `Pixmap`'s is zero-copy buffer wrapping (`skity_data_make_with_proc` → `skity_pixmap_create` → `skity_bitmap_create_from_pixmap`), while `WritableAddr8/16`, `GetID`, and pixel-change listeners have zero caller demand and stay out of the ABI.
