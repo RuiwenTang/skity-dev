@@ -20,6 +20,19 @@ From recorded draw objects to a submitted frame, inside `HWCanvas::OnFlush` and 
 4. **Commands** — each step resolves a pipeline from `HWPipelineLib` by `HWPipelineKey`, then its geometry fills vertex/uniform/bind-group data into a `Command` ([[gpu#Render passes and commands]]).
 5. **Upload & submit** — `HWStageBuffer::Flush` + `HWStaticBuffer::Flush` upload meshes; root layer opens `GPURenderPass` per `HWDrawPass`, replays clip steps, appends draw commands; `GPUCommandBuffer::Submit` finishes.
 
+## Frame boundary and save/restore state
+
+`Canvas::Save()`/`Restore()` state is split across two stores with different lifetimes; whether an unbalanced `Save()` at flush time corrupts later frames depends on how the caller manages canvas lifetime.
+
+Canvas lifetime has two modes. Unlike Skia (where a `SkCanvas` is typically long-lived), skity canvases are often one-shot: any integration that recreates the `GPUSurface` per frame (texture-mode rendering, golden/bench harnesses) gets a brand-new `HWCanvas` each `LockCanvas`. The other mode holds one `GPUSurface` across frames (example windows, on-screen surfaces); there `GPUSurfaceImpl` caches its `canvas_` member and reuses the same `HWCanvas` indefinitely.
+
+- `Canvas` base (`canvas.hpp`): `save_count_`, the matrix stack (`CanvasState`), and `global_clip_bounds_stack_` live on the canvas object — they survive flush only in the reused-canvas mode.
+- `HWCanvas` side: `HWLayerState::clip_stack_` — the source of scissor box, clip bounds and clip depth — lives on the root layer, which is rebuilt every frame in both modes (`LockCanvas` → `OnBeginNextFrame` arena allocation → `BeginNewFrame`; `GPUSurfaceImpl::Flush()` resets the arena).
+
+Verified consequence (offline Metal reproduction, 2026-09): with a reused canvas, a frame ending with `Save()` unbalanced makes `HWCanvas::OnFlush` discard the root layer together with its extra clip-stack entry, while the base-class side keeps the debt (`save_count_` still elevated). The next frame's `Restore()` lands on the fresh root layer; `HWLayerState::PopClipStack` has no lower-bound guard (unlike `LayerState::CanRestore`) and pops the constructor-time entry, leaving `clip_stack_` empty. `HWLayer::AddDraw` then reads `CurrentClipBounds()` as `back()` on an empty vector — out-of-bounds memory — and every draw of that frame, including a full-screen `DrawColor`, is silently culled. Each frame repeats the pattern, so nothing ever renders. With a one-shot canvas the same code renders fine: the new canvas starts at `save_count_ == 1`, so the stray `Restore()` is a no-op and the debt dies with the old object. Same source, two behaviors — the common one-shot mode is what hides this bug. Rule of thumb: balance `Save`/`Restore` within a frame, or restore to a known save count before flushing.
+
+Keeping canvas state across a flush is therefore not supported today, structurally. The matrix stack and `save_count_` do survive on a reused canvas, but the GPU-effective half — `HWLayerState::clip_stack_`/`clip_history_` hold `HWDraw*` into the frame arena (`ArenaAllocator::Reset()` at flush dangling them all), clip effect lives in the stencil attachment which is rebuilt per pass, and `draw_depth_` numbering is per-frame — dies with the frame. The recorder path is no escape either: `DisplayList` scopes a `Save` by back-filling its restore offset, and `PictureRecorder::FinishRecording` auto-closes any unbalanced save. Supporting it for real would mean keeping a draw-pointer-free semantic save/clip stack on the canvas (matrix + Path/Rect per level) and replaying it into each new root layer at `BeginNewFrame` (saveLayer contents still cannot cross a flush); the cheap alternative is auto-restoring to a known count at flush, which unifies both canvas modes.
+
 ## Draw steps, geometry and fragments
 
 The composable shader unit system under `src/render/hw/draw/`:
