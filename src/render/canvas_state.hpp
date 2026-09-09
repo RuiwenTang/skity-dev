@@ -15,11 +15,17 @@ class LayerState {
  public:
   explicit LayerState(const Matrix& world_matrix)
       : world_matrix_(world_matrix) {
-    elements_.emplace_back(Matrix{});
+    elements_.emplace_back(Matrix{}, world_matrix);
   }
   struct Element {
-    explicit Element(const Matrix& matrix) : matrix(matrix) {}
-    Matrix matrix;  // local to layer
+    Element(const Matrix& local_matrix, const Matrix& total_matrix)
+        : local_matrix(local_matrix), total_matrix(total_matrix) {}
+    // local_matrix maps canvas-local coordinates to the active layer, while
+    // total_matrix maps them to the root canvas. When world_matrix_ is
+    // invertible, total_matrix == world_matrix_ * local_matrix. For a singular
+    // world_matrix_, total_matrix remains the authoritative canvas transform.
+    Matrix local_matrix;
+    Matrix total_matrix;
   };
   void Save();
   void Restore();
@@ -36,11 +42,12 @@ class LayerState {
   void ResetMatrix();
 
   const Matrix& GetWorldMatrix() const { return world_matrix_; }
-  const Matrix& CurrentMatrix() const { return elements_.back().matrix; }
+  const Matrix& CurrentMatrix() const { return CurrentElement().local_matrix; }
 
-  Matrix GetTotalMatrix() const { return GetWorldMatrix() * CurrentMatrix(); }
+  Matrix GetTotalMatrix() const { return CurrentElement().total_matrix; }
 
  private:
+  Element& CurrentElement() { return elements_.back(); }
   const Element& CurrentElement() const { return elements_.back(); }
 
   std::vector<Element> elements_;
@@ -52,7 +59,15 @@ class CanvasState {
   CanvasState() { PushLayer(); }
 
   void Save() { CurrentLayerState().Save(); }
-  void SaveLayer(const Rect& bounds, const Paint& paint) { PushLayer(); }
+  void SaveLayer(const Rect& bounds, const Paint& paint) {
+    if (layer_fallback_) {
+      layer_fallback_ = false;
+      Save();
+      return;
+    }
+    PushLayer();
+  }
+  void MarkLayerFallback() { layer_fallback_ = true; }
   void Restore() {
     if (CurrentLayerState().CanRestore()) {
       CurrentLayerState().Restore();
@@ -95,6 +110,9 @@ class CanvasState {
   }
   void PopLayer() { layer_states_.pop_back(); }
   std::vector<LayerState> layer_states_;
+  // One-shot flag set when the renderer falls back from SaveLayer to Save.
+  // It is consumed by the immediately following SaveLayer().
+  bool layer_fallback_ = false;
 };
 
 }  // namespace skity

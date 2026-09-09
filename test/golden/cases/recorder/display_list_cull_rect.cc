@@ -16,13 +16,16 @@ static const char* kGoldenTestCoverageAAImageDir =
 namespace {
 
 bool CompareRecorderGolden(skity::DisplayList* display_list,
-                           const skity::Rect& cull_rect, const char* name) {
+                           const skity::Rect& cull_rect, const char* name,
+                           const skity::Matrix& initial_matrix = {}) {
   std::filesystem::path golden_path(kGoldenTestImageDir);
   golden_path.append(name);
   std::filesystem::path coverage_aa_path(kGoldenTestCoverageAAImageDir);
   coverage_aa_path.append(name);
 
-  auto render = [display_list, cull_rect](skity::Canvas* canvas) {
+  auto render = [display_list, cull_rect,
+                 initial_matrix](skity::Canvas* canvas) {
+    canvas->SetMatrix(initial_matrix);
     display_list->Draw(canvas, cull_rect);
   };
   bool result = skity::testing::CompareGoldenTexture(
@@ -179,6 +182,34 @@ std::unique_ptr<skity::DisplayList> BuildSetResetMatrixDisplayList() {
   blue.SetColor(skity::Color_BLUE);
   canvas->DrawCircle(40.f, 40.f, 20.f, blue);
   canvas->ResetMatrix();
+
+  return recorder.FinishRecording();
+}
+
+std::unique_ptr<skity::DisplayList> BuildSaveLayerSetResetMatrixDisplayList() {
+  skity::PictureRecorder recorder;
+  skity::DisplayListBuildOptions options;
+  options.build_rtree = true;
+  recorder.BeginRecording(skity::Rect::MakeWH(256.f, 256.f), options);
+  auto canvas = recorder.GetRecordingCanvas();
+
+  canvas->Translate(12.f, 8.f);
+  canvas->SaveLayer(skity::Rect::MakeWH(180.f, 180.f), skity::Paint{});
+
+  skity::Paint red;
+  red.SetColor(skity::Color_RED);
+  canvas->SetMatrix(skity::Matrix::Translate(32.f, 28.f));
+  canvas->DrawRect(skity::Rect::MakeXYWH(8.f, 8.f, 24.f, 20.f), red);
+
+  skity::Paint blue;
+  blue.SetColor(skity::Color_BLUE);
+  canvas->ResetMatrix();
+  canvas->DrawRect(skity::Rect::MakeXYWH(80.f, 28.f, 24.f, 20.f), blue);
+  canvas->Restore();
+
+  skity::Paint green;
+  green.SetColor(skity::Color_GREEN);
+  canvas->DrawRect(skity::Rect::MakeXYWH(124.f, 80.f, 24.f, 20.f), green);
 
   return recorder.FinishRecording();
 }
@@ -355,6 +386,16 @@ TEST(RecorderGolden, DisplayListCullRectSetResetMatrix) {
 
   EXPECT_TRUE(CompareRecorderGolden(
       dl.get(), cull_rect, "display_list_cull_rect_set_reset_matrix.png"));
+}
+
+TEST(RecorderGolden, DisplayListSaveLayerSetResetMatrix) {
+  auto dl = BuildSaveLayerSetResetMatrixDisplayList();
+  const auto initial_matrix =
+      skity::Matrix::Translate(16.f, 12.f) * skity::Matrix::Scale(1.25f, 1.25f);
+
+  EXPECT_TRUE(CompareRecorderGolden(
+      dl.get(), skity::Rect::MakeWH(256.f, 256.f),
+      "display_list_save_layer_set_reset_matrix.png", initial_matrix));
 }
 
 TEST(RecorderGolden, DisplayListCullRectClipDrawPaint) {

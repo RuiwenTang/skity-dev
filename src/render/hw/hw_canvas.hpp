@@ -103,7 +103,7 @@ class HWCanvas : public Canvas {
                           const float* position_y, const Font& font,
                           const Paint& paint, const Matrix& transform);
 
-  void DrawShape(const Shape& shape, const Paint& paint);
+  void DrawShape(const Shape& shape, const Paint& paint, bool is_local = true);
 
   void DrawPathInternal(const Path& path, const Paint& paint,
                         const Matrix& transform);
@@ -119,10 +119,9 @@ class HWCanvas : public Canvas {
   }
 
   void SetupLayerSpaceBoundsForDraw(HWDraw* draw, Rect bounds,
-                                    bool is_local = true) {
-    Matrix transform = is_local ? CurrentMatrix() : Matrix{};
+                                    const Matrix& local_to_layer) {
     draw->SetLayerSpaceBounds(
-        CurrentLayer()->CalculateLayerSpaceBounds(bounds, transform));
+        CurrentLayer()->CalculateLayerSpaceBounds(bounds, local_to_layer));
   }
 
   void SetupBlendPlanForDraw(HWDraw* draw, const Paint& paint,

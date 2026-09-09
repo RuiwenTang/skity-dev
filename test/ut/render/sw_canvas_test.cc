@@ -64,6 +64,51 @@ TEST(SWCanvas, SaveLayerHugeBoundsPreservesRotatedDraw) {
   }
 }
 
+TEST(SWCanvas, SetAndResetMatrixInsideSaveLayerUseGlobalMatrix) {
+  skity::Bitmap bitmap(64, 64, skity::AlphaType::kPremul_AlphaType,
+                       skity::ColorType::kRGBA);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+  ASSERT_TRUE(canvas);
+
+  canvas->Translate(20.f, 0.f);
+  canvas->SaveLayer(skity::kMaxCullRect, skity::Paint{});
+
+  skity::Paint red;
+  red.SetColor(skity::Color_RED);
+  canvas->SetMatrix(skity::Matrix::Translate(5.f, 0.f));
+  canvas->DrawRect(skity::Rect::MakeXYWH(0.f, 5.f, 4.f, 4.f), red);
+
+  skity::Paint blue;
+  blue.SetColor(skity::Color_BLUE);
+  canvas->ResetMatrix();
+  canvas->DrawRect(skity::Rect::MakeXYWH(0.f, 20.f, 4.f, 4.f), blue);
+  canvas->Restore();
+
+  EXPECT_EQ(bitmap.GetPixel(6, 6), skity::Color_RED);
+  EXPECT_EQ(bitmap.GetPixel(26, 6), skity::Color_TRANSPARENT);
+  EXPECT_EQ(bitmap.GetPixel(1, 21), skity::Color_BLUE);
+  EXPECT_EQ(bitmap.GetPixel(21, 21), skity::Color_TRANSPARENT);
+}
+
+TEST(SWCanvas, ResetMatrixInsideSmallScaleLayerUsesGlobalMatrix) {
+  skity::Bitmap bitmap(128, 128, skity::AlphaType::kPremul_AlphaType,
+                       skity::ColorType::kRGBA);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+  ASSERT_TRUE(canvas);
+
+  canvas->Scale(0.01f, 0.01f);
+  canvas->Skew(0.25f, 0.f);
+  canvas->SaveLayer(skity::Rect::MakeWH(10000.f, 10000.f), skity::Paint{});
+  canvas->ResetMatrix();
+
+  skity::Paint red;
+  red.SetColor(skity::Color_RED);
+  canvas->DrawRect(skity::Rect::MakeXYWH(20.f, 20.f, 20.f, 20.f), red);
+  canvas->Restore();
+
+  EXPECT_EQ(bitmap.GetPixel(30, 30), skity::Color_RED);
+}
+
 TEST(SWCanvas, StrokeThenFillDrawsFillAfterStroke) {
   skity::Bitmap bitmap(48, 48, skity::AlphaType::kPremul_AlphaType,
                        skity::ColorType::kRGBA);

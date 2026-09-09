@@ -108,13 +108,13 @@ class SKITY_API Canvas {
   void Concat(const Matrix& matrix);
 
   /**
-   * Replaces Matrix with the given matrix.
-   * @param matrix matrix to replace existing Matrix
+   * Replaces the total Matrix applied to Canvas with the given matrix.
+   * @param matrix matrix to replace the total Canvas Matrix
    */
   void SetMatrix(const Matrix& matrix);
 
   /**
-   * Reset current Matrix to identity matrix.
+   * Resets the total Matrix applied to Canvas to identity matrix.
    */
   void ResetMatrix();
 

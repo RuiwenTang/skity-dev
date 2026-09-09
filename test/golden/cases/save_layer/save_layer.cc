@@ -8,7 +8,9 @@
 #include <skity/recorder/picture_recorder.hpp>
 
 #include "common/golden_test_check.hpp"
+#include "common/golden_test_env.hpp"
 #include "skity/effect/image_filter.hpp"
+#include "skity/effect/shader.hpp"
 #include "skity/geometry/camera.hpp"
 #include "skity/geometry/matrix.hpp"
 #include "skity/graphic/bitmap.hpp"
@@ -192,4 +194,172 @@ TEST(SaveLayerGolden, PerspectiveZ0Plane) {
       skity::testing::PathList{.cpu_tess_path = golden_path.c_str(),
                                .gpu_tess_path = golden_path.c_str(),
                                .coverage_aa_path = coverage_aa_path.c_str()}));
+}
+
+TEST(SaveLayerGolden, SingularMatrixDoesNotCrash) {
+  const float values[9] = {
+      1.f, 1.f, 0.f,  //
+      1.f, 1.f, 0.f,  //
+      0.f, 0.f, 1.f,  //
+  };
+  skity::Matrix singular_matrix;
+  singular_matrix.Set9(values);
+  ASSERT_FALSE(singular_matrix.InvertZ0Plane(nullptr));
+
+  auto* env = skity::testing::GoldenTestEnv::GetInstance();
+  ASSERT_NE(env, nullptr);
+  auto texture =
+      env->RenderToTexture(64, 64, [singular_matrix](skity::Canvas* canvas) {
+        canvas->SetMatrix(singular_matrix);
+        const int save_count = canvas->GetSaveCount();
+        canvas->SaveLayer(skity::Rect::MakeWH(32.f, 32.f), skity::Paint{});
+
+        skity::Paint paint;
+        paint.SetColor(skity::Color_RED);
+        canvas->SetMatrix(skity::Matrix::Translate(8.f, 8.f));
+        canvas->DrawRect(skity::Rect::MakeWH(24.f, 24.f), paint);
+
+        paint.SetColor(skity::Color_BLUE);
+        canvas->ResetMatrix();
+        canvas->DrawCircle(24.f, 24.f, 12.f, paint);
+        canvas->Restore();
+        EXPECT_EQ(canvas->GetSaveCount(), save_count);
+
+        paint.SetColor(skity::Color_GREEN);
+        canvas->ResetMatrix();
+        canvas->DrawRect(skity::Rect::MakeXYWH(48.f, 48.f, 8.f, 8.f), paint);
+      });
+
+  ASSERT_NE(texture, nullptr);
+  EXPECT_NE(texture->ReadPixels(), nullptr);
+}
+
+TEST(SaveLayerGolden, ResetMatrixDrawColorFillsLayer) {
+  auto* env = skity::testing::GoldenTestEnv::GetInstance();
+  ASSERT_NE(env, nullptr);
+  auto texture = env->RenderToTexture(80, 40, [](skity::Canvas* canvas) {
+    canvas->Clear(skity::Color_GREEN);
+    canvas->Translate(20.f, 0.f);
+    canvas->SaveLayer(skity::Rect::MakeWH(40.f, 40.f), skity::Paint{});
+    canvas->ResetMatrix();
+    canvas->DrawColor(skity::Color_RED);
+    canvas->Restore();
+  });
+
+  ASSERT_NE(texture, nullptr);
+  auto pixels = texture->ReadPixels();
+  ASSERT_NE(pixels, nullptr);
+  skity::Bitmap bitmap(std::move(pixels));
+  EXPECT_EQ(bitmap.GetPixel(25, 20), skity::Color_RED);
+  EXPECT_EQ(bitmap.GetPixel(55, 20), skity::Color_RED);
+  EXPECT_EQ(bitmap.GetPixel(65, 20), skity::Color_GREEN);
+}
+
+TEST(SaveLayerGolden, FailedSaveLayerPreservesMatrix) {
+  auto* env = skity::testing::GoldenTestEnv::GetInstance();
+  ASSERT_NE(env, nullptr);
+  auto texture = env->RenderToTexture(80, 40, [](skity::Canvas* canvas) {
+    canvas->Clear(skity::Color_GREEN);
+    canvas->Translate(20.f, 0.f);
+
+    skity::Paint layer_paint;
+    layer_paint.SetImageFilter(
+        skity::ImageFilters::MatrixTransform(skity::Matrix{}));
+    canvas->SaveLayer(skity::Rect::MakeWH(100000.f, 100000.f), layer_paint);
+
+    skity::Paint paint;
+    paint.SetColor(skity::Color_RED);
+    canvas->SetMatrix(skity::Matrix::Translate(40.f, 0.f));
+    canvas->DrawRect(skity::Rect::MakeXYWH(0.f, 4.f, 8.f, 8.f), paint);
+
+    paint.SetColor(skity::Color_BLUE);
+    canvas->ResetMatrix();
+    canvas->DrawRect(skity::Rect::MakeXYWH(40.f, 16.f, 8.f, 8.f), paint);
+    canvas->Restore();
+
+    paint.SetColor(skity::Color_WHITE);
+    canvas->DrawRect(skity::Rect::MakeXYWH(0.f, 28.f, 8.f, 8.f), paint);
+  });
+
+  ASSERT_NE(texture, nullptr);
+  auto pixels = texture->ReadPixels();
+  ASSERT_NE(pixels, nullptr);
+  skity::Bitmap bitmap(std::move(pixels));
+  EXPECT_EQ(bitmap.GetPixel(44, 8), skity::Color_RED);
+  EXPECT_EQ(bitmap.GetPixel(24, 8), skity::Color_GREEN);
+  EXPECT_EQ(bitmap.GetPixel(44, 20), skity::Color_BLUE);
+  EXPECT_EQ(bitmap.GetPixel(24, 20), skity::Color_GREEN);
+  EXPECT_EQ(bitmap.GetPixel(24, 32), skity::Color_WHITE);
+  EXPECT_EQ(bitmap.GetPixel(4, 32), skity::Color_GREEN);
+}
+
+TEST(SaveLayerGolden, NearSingularResetMatrixDrawColorFillsLayer) {
+  auto* env = skity::testing::GoldenTestEnv::GetInstance();
+  ASSERT_NE(env, nullptr);
+  auto texture = env->RenderToTexture(80, 40, [](skity::Canvas* canvas) {
+    canvas->Translate(20.f, 0.f);
+    canvas->Scale(100.f, 100.f);
+    canvas->Skew(0.25f, 0.f);
+    canvas->SaveLayer(skity::Rect::MakeWH(0.4f, 0.4f), skity::Paint{});
+    canvas->ResetMatrix();
+    canvas->DrawColor(skity::Color_RED);
+    canvas->Restore();
+  });
+
+  ASSERT_NE(texture, nullptr);
+  auto pixels = texture->ReadPixels();
+  ASSERT_NE(pixels, nullptr);
+  skity::Bitmap bitmap(std::move(pixels));
+  EXPECT_EQ(bitmap.GetPixel(35, 20), skity::Color_RED);
+  EXPECT_EQ(bitmap.GetPixel(55, 20), skity::Color_RED);
+}
+
+TEST(SaveLayerGolden, NearSingularDrawPaintPreservesShaderCoordinates) {
+  auto* env = skity::testing::GoldenTestEnv::GetInstance();
+  ASSERT_NE(env, nullptr);
+  auto texture = env->RenderToTexture(80, 40, [](skity::Canvas* canvas) {
+    canvas->Translate(20.f, 0.f);
+    canvas->Scale(100.f, 100.f);
+    canvas->Skew(0.25f, 0.f);
+    canvas->SaveLayer(skity::Rect::MakeWH(0.4f, 0.4f), skity::Paint{});
+    canvas->ResetMatrix();
+
+    skity::Point points[] = {{20.f, 0.f, 0.f, 1.f}, {40.f, 0.f, 0.f, 1.f}};
+    skity::Vec4 colors[] = {skity::Colors::kRed, skity::Colors::kBlue};
+    skity::Paint paint;
+    paint.SetShader(skity::Shader::MakeLinear(points, colors, nullptr, 2));
+    canvas->DrawPaint(paint);
+    canvas->Restore();
+  });
+
+  ASSERT_NE(texture, nullptr);
+  auto pixels = texture->ReadPixels();
+  ASSERT_NE(pixels, nullptr);
+  skity::Bitmap bitmap(std::move(pixels));
+  EXPECT_EQ(bitmap.GetPixel(55, 20), skity::Color_BLUE);
+}
+
+TEST(SaveLayerGolden, NearSingularDrawPaintWithImageFilterFillsLayer) {
+  auto* env = skity::testing::GoldenTestEnv::GetInstance();
+  ASSERT_NE(env, nullptr);
+  auto texture = env->RenderToTexture(80, 40, [](skity::Canvas* canvas) {
+    canvas->Translate(20.f, 0.f);
+    canvas->Scale(100.f, 100.f);
+    canvas->Skew(0.25f, 0.f);
+    canvas->SaveLayer(skity::Rect::MakeWH(0.4f, 0.4f), skity::Paint{});
+    canvas->ResetMatrix();
+
+    skity::Paint paint;
+    paint.SetColor(skity::Color_RED);
+    paint.SetImageFilter(skity::ImageFilters::MatrixTransform(skity::Matrix{}));
+    canvas->DrawPaint(paint);
+    canvas->Restore();
+  });
+
+  ASSERT_NE(texture, nullptr);
+  auto pixels = texture->ReadPixels();
+  ASSERT_NE(pixels, nullptr);
+  skity::Bitmap bitmap(std::move(pixels));
+  EXPECT_EQ(bitmap.GetPixel(35, 20), skity::Color_RED);
+  EXPECT_EQ(bitmap.GetPixel(55, 20), skity::Color_RED);
 }

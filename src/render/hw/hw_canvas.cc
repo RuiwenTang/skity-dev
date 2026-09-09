@@ -170,7 +170,8 @@ void HWCanvas::OnDrawRRect(RRect const& rrect, Paint const& paint) {
   DrawShape(Shape(&rrect), paint);
 }
 
-void HWCanvas::DrawShape(const Shape& shape, const Paint& paint) {
+void HWCanvas::DrawShape(const Shape& shape, const Paint& paint,
+                         bool is_local) {
   if (CurrentLayer() == nullptr) {
     return;
   }
@@ -188,12 +189,12 @@ void HWCanvas::DrawShape(const Shape& shape, const Paint& paint) {
     return;
   }
 
-  if (QuickReject(paint.ComputeFastBounds(shape.GetBounds()))) {
+  if (is_local && QuickReject(paint.ComputeFastBounds(shape.GetBounds()))) {
     return;
   }
 
   bool has_layer = false;
-  Matrix current_matrix = CurrentMatrix();
+  Matrix current_matrix = is_local ? CurrentMatrix() : Matrix{};
   Paint working_paint{paint};
 
   if (NeesOffScreenLayer(paint)) {
@@ -236,8 +237,28 @@ void HWCanvas::OnDrawPaint(const Paint& paint) {
   }
 
   auto rect = CurrentLayer()->GetBounds();
+  Matrix layer_to_local;
+  bool has_layer_to_local = CurrentMatrix().InvertZ0Plane(&layer_to_local);
+  if (!has_layer_to_local) {
+    auto* canvas_state = GetCanvasState();
+    Matrix total_to_local;
+    if (canvas_state->GetTotalMatrix().InvertZ0Plane(&total_to_local)) {
+      // layer-to-local = world-to-local * layer-to-world. Factor the inverse
+      // this way to avoid rejecting a valid but very small determinant.
+      layer_to_local =
+          total_to_local * canvas_state->CurrentLayerState().GetWorldMatrix();
+      has_layer_to_local = true;
+    }
+  }
 
-  this->OnDrawRect(rect, paint);
+  if (has_layer_to_local) {
+    layer_to_local.MapRect(&rect, rect);
+    this->OnDrawRect(rect, paint);
+    return;
+  }
+
+  auto rrect = RRect::MakeRect(rect);
+  DrawShape(Shape(&rrect), paint, /*is_local=*/false);
 }
 
 void HWCanvas::OnSaveLayer(const Rect& bounds, const Paint& paint) {
@@ -253,6 +274,7 @@ void HWCanvas::OnSaveLayer(const Rect& bounds, const Paint& paint) {
   if (!layer) {
     this->OnSave();
     this->OnClipRect(bounds, ClipOp::kIntersect);
+    GetCanvasState()->MarkLayerFallback();
     return;
   }
 
@@ -391,7 +413,7 @@ void HWCanvas::DrawGlyphsInternal(uint32_t count, const GlyphID* glyphs,
     if (draw) {
       draw->SetSampleCount(GetCanvasSampleCount());
       SetupLayerSpaceBoundsForDraw(
-          draw, paint.ComputeFastBounds(glyph_run->GetBounds()), false);
+          draw, paint.ComputeFastBounds(glyph_run->GetBounds()), Matrix{});
       // TODO(ColdPaleLight): create glyph draw fragments after the dst-read
       // strategy is known, or let glyph draws rebuild programmable blending
       // state here.
@@ -441,7 +463,7 @@ void HWCanvas::DrawPathInternal(const Path& path, const Paint& paint,
     draw->SetSampleCount(GetCanvasSampleCount());
     auto bounds = is_stroke ? paint.ComputeFastBounds(path.GetBounds())
                             : path.GetBounds();
-    SetupLayerSpaceBoundsForDraw(draw, bounds);
+    SetupLayerSpaceBoundsForDraw(draw, bounds, transform);
     if (analytical_aa == AnalyticalAAMode::kContour) {
       draw->SetLayerSpaceBounds(
           draw->GetLayerSpaceBounds().MakeOutset(1.f, 1.f));
@@ -581,7 +603,7 @@ void HWCanvas::DrawRRectInternal(const RRect& rrect, const Paint& paint,
     draw->SetSampleCount(GetCanvasSampleCount());
     auto bounds = use_stroke ? paint.ComputeFastBounds(rrect.GetBounds())
                              : rrect.GetBounds();
-    SetupLayerSpaceBoundsForDraw(draw, bounds);
+    SetupLayerSpaceBoundsForDraw(draw, bounds, transform);
     SetupBlendPlanForDraw(draw, paint,
                           /*has_fragment_mask=*/true);
     CurrentLayer()->AddDraw(draw);

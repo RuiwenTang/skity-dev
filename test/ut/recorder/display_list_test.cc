@@ -762,6 +762,219 @@ TEST(DisplayList, DrawNullCanvasNoOp) {
   display_list->Draw(nullptr, skity::Rect::MakeLTRB(10, 10, 20, 20));
 }
 
+TEST(DisplayList, DrawPreservesInitialMatrixForSetAndResetMatrix) {
+  skity::PictureRecorder recorder;
+  recorder.BeginRecording();
+  auto canvas = recorder.GetRecordingCanvas();
+
+  const skity::Matrix recorded_matrix = skity::Matrix::Translate(20, 30);
+  const skity::Rect transformed_rect = skity::Rect::MakeLTRB(0, 0, 10, 10);
+  const skity::Rect reset_rect = skity::Rect::MakeLTRB(100, 100, 110, 110);
+  canvas->SetMatrix(recorded_matrix);
+  canvas->DrawRect(transformed_rect, skity::Paint{});
+  canvas->ResetMatrix();
+  canvas->DrawRect(reset_rect, skity::Paint{});
+
+  auto display_list = recorder.FinishRecording();
+  MockCanvas mock_canvas;
+  const skity::Matrix initial_matrix =
+      skity::Matrix::Translate(0, 200) * skity::Matrix::Scale(1, -1);
+  mock_canvas.SetMatrix(initial_matrix);
+
+  testing::InSequence sequence;
+  EXPECT_CALL(mock_canvas, OnDrawRect(transformed_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(),
+                  initial_matrix * recorded_matrix);
+      });
+  EXPECT_CALL(mock_canvas, OnDrawRect(reset_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(), initial_matrix);
+      });
+
+  display_list->Draw(&mock_canvas);
+}
+
+TEST(DisplayList, DrawPreservesInitialMatrixWithSaveRestore) {
+  skity::PictureRecorder recorder;
+  recorder.BeginRecording();
+  auto canvas = recorder.GetRecordingCanvas();
+
+  const skity::Matrix recorded_transform = skity::Matrix::Translate(10, 5);
+  const skity::Matrix recorded_matrix = skity::Matrix::Translate(20, 30);
+  const skity::Rect set_rect = skity::Rect::MakeLTRB(0, 0, 10, 10);
+  const skity::Rect reset_rect = skity::Rect::MakeLTRB(20, 20, 30, 30);
+  const skity::Rect restored_rect = skity::Rect::MakeLTRB(40, 40, 50, 50);
+  canvas->Concat(recorded_transform);
+  canvas->Save();
+  canvas->SetMatrix(recorded_matrix);
+  canvas->DrawRect(set_rect, skity::Paint{});
+  canvas->ResetMatrix();
+  canvas->DrawRect(reset_rect, skity::Paint{});
+  canvas->Restore();
+  canvas->DrawRect(restored_rect, skity::Paint{});
+
+  auto display_list = recorder.FinishRecording();
+  MockCanvas mock_canvas;
+  const skity::Matrix initial_matrix =
+      skity::Matrix::Translate(0, 200) * skity::Matrix::Scale(1, -1);
+  mock_canvas.SetMatrix(initial_matrix);
+
+  testing::InSequence sequence;
+  EXPECT_CALL(mock_canvas, OnSave()).Times(1);
+  EXPECT_CALL(mock_canvas, OnDrawRect(set_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(),
+                  initial_matrix * recorded_matrix);
+      });
+  EXPECT_CALL(mock_canvas, OnDrawRect(reset_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(), initial_matrix);
+      });
+  EXPECT_CALL(mock_canvas, OnRestore()).Times(1);
+  EXPECT_CALL(mock_canvas, OnDrawRect(restored_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(),
+                  initial_matrix * recorded_transform);
+      });
+
+  display_list->Draw(&mock_canvas);
+}
+
+TEST(DisplayList, DrawPreservesInitialMatrixInsideSaveLayer) {
+  skity::PictureRecorder recorder;
+  recorder.BeginRecording();
+  auto canvas = recorder.GetRecordingCanvas();
+
+  const skity::Matrix recorded_transform = skity::Matrix::Translate(10, 5);
+  const skity::Matrix recorded_matrix = skity::Matrix::Translate(20, 30);
+  const skity::Rect layer_bounds = skity::Rect::MakeLTRB(0, 0, 200, 200);
+  const skity::Rect set_rect = skity::Rect::MakeLTRB(0, 0, 10, 10);
+  const skity::Rect reset_rect = skity::Rect::MakeLTRB(20, 20, 30, 30);
+  const skity::Rect restored_rect = skity::Rect::MakeLTRB(40, 40, 50, 50);
+  const skity::Paint layer_paint;
+  canvas->Concat(recorded_transform);
+  canvas->SaveLayer(layer_bounds, layer_paint);
+  canvas->SetMatrix(recorded_matrix);
+  canvas->DrawRect(set_rect, skity::Paint{});
+  canvas->ResetMatrix();
+  canvas->DrawRect(reset_rect, skity::Paint{});
+  canvas->Restore();
+  canvas->DrawRect(restored_rect, skity::Paint{});
+
+  auto display_list = recorder.FinishRecording();
+  MockCanvas mock_canvas;
+  const skity::Matrix initial_matrix =
+      skity::Matrix::Translate(0, 200) * skity::Matrix::Scale(1, -1);
+  mock_canvas.SetMatrix(initial_matrix);
+
+  testing::InSequence sequence;
+  EXPECT_CALL(mock_canvas, OnSaveLayer(layer_bounds, layer_paint)).Times(1);
+  EXPECT_CALL(mock_canvas, OnDrawRect(set_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(),
+                  initial_matrix * recorded_matrix);
+      });
+  EXPECT_CALL(mock_canvas, OnDrawRect(reset_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(), initial_matrix);
+      });
+  EXPECT_CALL(mock_canvas, OnRestore()).Times(1);
+  EXPECT_CALL(mock_canvas, OnDrawRect(restored_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(),
+                  initial_matrix * recorded_transform);
+      });
+
+  display_list->Draw(&mock_canvas);
+}
+
+TEST(DisplayList, PartialDrawPreservesInitialMatrix) {
+  skity::PictureRecorder recorder;
+  skity::DisplayListBuildOptions options;
+  options.build_rtree = true;
+  recorder.BeginRecording(skity::Rect::MakeLTRB(0, 0, 200, 200), options);
+  auto canvas = recorder.GetRecordingCanvas();
+
+  const skity::Matrix recorded_matrix = skity::Matrix::Translate(20, 30);
+  const skity::Rect transformed_rect = skity::Rect::MakeLTRB(0, 0, 10, 10);
+  const skity::Rect reset_rect = skity::Rect::MakeLTRB(100, 100, 110, 110);
+  canvas->SetMatrix(recorded_matrix);
+  canvas->DrawRect(transformed_rect, skity::Paint{});
+  canvas->ResetMatrix();
+  canvas->DrawRect(reset_rect, skity::Paint{});
+
+  auto display_list = recorder.FinishRecording();
+  MockCanvas mock_canvas;
+  const skity::Matrix initial_matrix =
+      skity::Matrix::Translate(0, 200) * skity::Matrix::Scale(1, -1);
+  mock_canvas.SetMatrix(initial_matrix);
+
+  testing::InSequence sequence;
+  EXPECT_CALL(mock_canvas, OnDrawRect(transformed_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(),
+                  initial_matrix * recorded_matrix);
+      });
+  EXPECT_CALL(mock_canvas, OnDrawRect(reset_rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(), initial_matrix);
+      });
+
+  display_list->Draw(&mock_canvas, skity::Rect::MakeLTRB(20, 30, 110, 110));
+}
+
+TEST(DisplayList, PartialDrawPreservesInitialMatrixWithoutRTree) {
+  skity::PictureRecorder recorder;
+  recorder.BeginRecording();
+  auto canvas = recorder.GetRecordingCanvas();
+
+  const skity::Matrix recorded_matrix = skity::Matrix::Translate(20, 30);
+  const skity::Rect rect = skity::Rect::MakeLTRB(0, 0, 10, 10);
+  canvas->SetMatrix(recorded_matrix);
+  canvas->DrawRect(rect, skity::Paint{});
+
+  auto display_list = recorder.FinishRecording();
+  MockCanvas mock_canvas;
+  const skity::Matrix initial_matrix =
+      skity::Matrix::Translate(0, 200) * skity::Matrix::Scale(1, -1);
+  mock_canvas.SetMatrix(initial_matrix);
+
+  EXPECT_CALL(mock_canvas, OnDrawRect(rect, _))
+      .WillOnce([&](const skity::Rect&, const skity::Paint&) {
+        EXPECT_EQ(mock_canvas.GetTotalMatrix(),
+                  initial_matrix * recorded_matrix);
+      });
+
+  display_list->Draw(&mock_canvas, skity::Rect::MakeLTRB(0, 0, 10, 10));
+}
+
+TEST(DisplayList, SetAndResetMatrixInsideSingularOrSmallScaleLayer) {
+  const skity::Matrix singular(1.f, 1.f, 0.f, 1.f, 1.f, 0.f, 0.f, 0.f, 1.f);
+  const skity::Matrix small_scale =
+      skity::Matrix::Scale(0.01f, 0.01f) * skity::Matrix::Skew(0.25f, 0.f);
+  for (const auto& initial_matrix : {singular, small_scale}) {
+    SCOPED_TRACE(initial_matrix == singular
+                     ? "singular layer transform"
+                     : "small invertible layer transform");
+    skity::PictureRecorder recorder;
+    recorder.BeginRecording();
+    auto* canvas = recorder.GetRecordingCanvas();
+    canvas->SetMatrix(initial_matrix);
+    canvas->SaveLayer(skity::Rect::MakeWH(10000.f, 10000.f), skity::Paint{});
+
+    // A failed layer inverse must not change the requested total matrix.
+    const auto requested_matrix = skity::Matrix::Translate(30.f, 40.f);
+    canvas->SetMatrix(requested_matrix);
+    EXPECT_EQ(canvas->GetTotalMatrix(), requested_matrix);
+    canvas->ResetMatrix();
+    EXPECT_TRUE(canvas->GetTotalMatrix().IsIdentity());
+
+    canvas->Restore();
+    EXPECT_EQ(canvas->GetTotalMatrix(), initial_matrix);
+  }
+}
+
 TEST(DisplayList, ClipRect) {
   {
     skity::PictureRecorder recorder;

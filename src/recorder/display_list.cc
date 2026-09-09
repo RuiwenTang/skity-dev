@@ -66,7 +66,8 @@ int32_t GetReplayScopeEndOffset(const RecordedOp *op) {
   }
 }
 
-void ReplayRecordedOp(Canvas *canvas, const RecordedOp *op) {
+void ReplayRecordedOp(Canvas *canvas, const RecordedOp *op,
+                      const Matrix &initial_matrix) {
   switch (op->type) {
     case RecordedOpType::kSave: {
       canvas->Save();
@@ -101,10 +102,10 @@ void ReplayRecordedOp(Canvas *canvas, const RecordedOp *op) {
     } break;
     case RecordedOpType::kSetMatrix: {
       auto *set_matrix_op = static_cast<const SetMatrixOp *>(op);
-      canvas->SetMatrix(set_matrix_op->matrix);
+      canvas->SetMatrix(initial_matrix * set_matrix_op->matrix);
     } break;
     case RecordedOpType::kResetMatrix: {
-      canvas->ResetMatrix();
+      canvas->SetMatrix(initial_matrix);
     } break;
     case RecordedOpType::kClipRect: {
       auto *clip_rect_op = static_cast<const ClipRectOp *>(op);
@@ -332,13 +333,14 @@ void DisplayList::Draw(Canvas *canvas) const {
     return;
   }
 
+  const Matrix initial_matrix = canvas->GetTotalMatrix();
   const uint8_t *ptr = storage_.get();
   const uint8_t *end = ptr + byte_count_;
 
   while (ptr < end) {
     auto op = reinterpret_cast<const RecordedOp *>(ptr);
     ptr += op->size;
-    ReplayRecordedOp(canvas, op);
+    ReplayRecordedOp(canvas, op, initial_matrix);
   }
 }
 
@@ -360,6 +362,8 @@ void DisplayList::Draw(Canvas *canvas, const Rect &cull_rect) const {
   if (target_offsets.empty()) {
     return;
   }
+
+  const Matrix initial_matrix = canvas->GetTotalMatrix();
 
   auto for_each_recorded_op = [this](auto &&fn) {
     const uint8_t *ptr = storage_.get();
@@ -404,7 +408,7 @@ void DisplayList::Draw(Canvas *canvas, const Rect &cull_rect) const {
             {next_scope_end_offset, restore_offset, should_replay});
         next_scope_end_offset = restore_offset;
         if (should_replay) {
-          ReplayRecordedOp(canvas, op);
+          ReplayRecordedOp(canvas, op, initial_matrix);
         }
       } break;
       case RecordedOpType::kRestore: {
@@ -421,14 +425,14 @@ void DisplayList::Draw(Canvas *canvas, const Rect &cull_rect) const {
       default:
         if (IsReplayStateOp(op->type)) {
           if (next_target_offset < next_scope_end_offset) {
-            ReplayRecordedOp(canvas, op);
+            ReplayRecordedOp(canvas, op, initial_matrix);
           }
           break;
         }
         if (!IsReplayDrawOp(op->type) || offset != next_target_offset) {
           break;
         }
-        ReplayRecordedOp(canvas, op);
+        ReplayRecordedOp(canvas, op, initial_matrix);
         ++next_target_it;
         next_target_offset = next_target_it != target_end
                                  ? next_target_it->GetValue()

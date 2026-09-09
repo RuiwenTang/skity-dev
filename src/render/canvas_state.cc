@@ -6,7 +6,7 @@
 
 namespace skity {
 
-void LayerState::Save() { elements_.emplace_back(CurrentMatrix()); }
+void LayerState::Save() { elements_.emplace_back(CurrentElement()); }
 
 void LayerState::Restore() {
   if (!CanRestore()) {
@@ -16,35 +16,46 @@ void LayerState::Restore() {
 }
 
 void LayerState::Translate(float dx, float dy) {
-  elements_.back().matrix = CurrentMatrix() * Matrix::Translate(dx, dy);
+  Concat(Matrix::Translate(dx, dy));
 }
 
-void LayerState::Scale(float sx, float sy) {
-  elements_.back().matrix = CurrentMatrix() * Matrix::Scale(sx, sy);
-}
+void LayerState::Scale(float sx, float sy) { Concat(Matrix::Scale(sx, sy)); }
 
 void LayerState::Rotate(float degree) {
-  elements_.back().matrix =
-      CurrentMatrix() * Matrix::RotateDeg(degree, Vec2{0, 0});
+  Concat(Matrix::RotateDeg(degree, Vec2{0, 0}));
 }
 
 void LayerState::Rotate(float degree, float px, float py) {
-  elements_.back().matrix =
-      CurrentMatrix() * Matrix::RotateDeg(degree, Vec2{px, py});
+  Concat(Matrix::RotateDeg(degree, Vec2{px, py}));
 }
 
-void LayerState::Skew(float sx, float sy) {
-  elements_.back().matrix = CurrentMatrix() * Matrix::Skew(sx, sy);
-}
+void LayerState::Skew(float sx, float sy) { Concat(Matrix::Skew(sx, sy)); }
 
 void LayerState::Concat(const Matrix& matrix) {
-  elements_.back().matrix = CurrentMatrix() * matrix;
+  auto& element = CurrentElement();
+  element.local_matrix = element.local_matrix * matrix;
+  element.total_matrix = element.total_matrix * matrix;
 }
 
 void LayerState::SetMatrix(const Matrix& matrix) {
-  elements_.back().matrix = matrix;
+  auto& element = CurrentElement();
+  element.total_matrix = matrix;
+  if (world_matrix_.IsIdentity()) {
+    element.local_matrix = matrix;
+    return;
+  }
+
+  Matrix world_to_layer;
+  if (world_matrix_.InvertZ0Plane(&world_to_layer)) {
+    element.local_matrix = world_to_layer * matrix;
+  } else {
+    // A singular layer transform cannot represent an arbitrary total matrix
+    // in layer-local coordinates. Keep the local matrix valid; the exact total
+    // matrix is still tracked separately.
+    element.local_matrix = matrix;
+  }
 }
 
-void LayerState::ResetMatrix() { elements_.back().matrix = Matrix{}; }
+void LayerState::ResetMatrix() { SetMatrix(Matrix{}); }
 
 }  // namespace skity

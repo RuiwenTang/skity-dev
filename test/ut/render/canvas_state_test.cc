@@ -91,3 +91,56 @@ TEST(CanvasState, CurrentLayerMatrix) {
                 skity::Matrix::RotateDeg(20, skity::Vec2{1.0, 3.0}));
   state.Restore();
 }
+
+TEST(CanvasState, SetAndResetMatrixInsideSaveLayer) {
+  skity::CanvasState state;
+  const skity::Matrix layer_world_matrix =
+      skity::Matrix::Translate(10, 20) * skity::Matrix::Scale(2, 3);
+  state.Concat(layer_world_matrix);
+  state.SaveLayer(skity::Rect::MakeLTRB(0, 0, 100, 100), skity::Paint{});
+
+  const skity::Matrix matrix = skity::Matrix::Translate(30, 40);
+  state.SetMatrix(matrix);
+  EXPECT_EQ(state.GetTotalMatrix(), matrix);
+
+  skity::Matrix world_to_layer;
+  ASSERT_TRUE(layer_world_matrix.InvertZ0Plane(&world_to_layer));
+  EXPECT_EQ(state.CurrentLayerMatrix(), world_to_layer * matrix);
+
+  const skity::Matrix concat_matrix = skity::Matrix::Scale(2, 4);
+  state.Concat(concat_matrix);
+  EXPECT_EQ(state.GetTotalMatrix(), matrix * concat_matrix);
+  EXPECT_EQ(state.CurrentLayerMatrix(),
+            world_to_layer * matrix * concat_matrix);
+
+  state.ResetMatrix();
+  EXPECT_TRUE(state.GetTotalMatrix().IsIdentity());
+  EXPECT_EQ(state.CurrentLayerMatrix(), world_to_layer);
+
+  state.Restore();
+  EXPECT_EQ(state.GetTotalMatrix(), layer_world_matrix);
+}
+
+TEST(CanvasState, SingularLayerSetMatrixKeepsRequestedTotalMatrix) {
+  skity::CanvasState state;
+  const skity::Matrix singular_matrix = skity::Matrix::Scale(0, 1);
+  ASSERT_FALSE(singular_matrix.InvertZ0Plane(nullptr));
+  state.SetMatrix(singular_matrix);
+  state.SaveLayer(skity::Rect::MakeWH(100, 100), skity::Paint{});
+
+  const skity::Matrix matrix = skity::Matrix::Translate(30, 40);
+  const skity::Matrix concat_matrix = skity::Matrix::Scale(2, 4);
+  state.SetMatrix(matrix);
+  state.Concat(concat_matrix);
+
+  const skity::Matrix expected_matrix = matrix * concat_matrix;
+  EXPECT_EQ(state.CurrentLayerMatrix(), expected_matrix);
+  EXPECT_EQ(state.GetTotalMatrix(), expected_matrix);
+
+  state.SaveLayer(skity::Rect::MakeWH(50, 50), skity::Paint{});
+  EXPECT_TRUE(state.CurrentLayerMatrix().IsIdentity());
+  EXPECT_EQ(state.GetTotalMatrix(), expected_matrix);
+  state.Restore();
+  state.Restore();
+  EXPECT_EQ(state.GetTotalMatrix(), singular_matrix);
+}
