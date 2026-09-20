@@ -127,3 +127,5 @@ uint32_t Hash32(const void* data, size_t bytes, uint32_t seed) {
 // size report ci validation placeholder
 
 // size report ci validation placeholder v2
+
+// regression trigger for hardened size report
