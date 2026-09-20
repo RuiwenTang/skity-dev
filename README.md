@@ -11,19 +11,19 @@
 | x86 | 1.78 MB | 867.4 KB |
 | x86_64 | 1.85 MB | 861.9 KB |
 
-Latest commit: `95dab3b282`
+Latest commit: `7d52972b03`
 
 ## Uncompressed size trend
 
 ```mermaid
 xychart-beta
     title "libskity.so uncompressed size (KB)"
-    x-axis ["09/20", "09/20", "09/20"]
+    x-axis ["09/20", "09/20", "09/20", "09/20"]
     y-axis "KB"
-    line "arm64-v8a" [1714.3, 1714.3, 1714.3]
-    line "armeabi-v7a" [1161.7, 1161.7, 1161.7]
-    line "x86" [1817.6, 1817.6, 1817.6]
-    line "x86_64" [1890.3, 1890.3, 1890.3]
+    line "arm64-v8a" [1714.3, 1714.3, 1714.3, 1714.3]
+    line "armeabi-v7a" [1161.7, 1161.7, 1161.7, 1161.7]
+    line "x86" [1817.6, 1817.6, 1817.6, 1817.6]
+    line "x86_64" [1890.3, 1890.3, 1890.3, 1890.3]
 ```
 
 ## Compressed size trend
@@ -31,10 +31,10 @@ xychart-beta
 ```mermaid
 xychart-beta
     title "libskity.so compressed size (KB)"
-    x-axis ["09/20", "09/20", "09/20"]
+    x-axis ["09/20", "09/20", "09/20", "09/20"]
     y-axis "KB"
-    line "arm64-v8a" [835.9, 835.9, 835.9]
-    line "armeabi-v7a" [704.1, 704.1, 703.9]
-    line "x86" [867.6, 867.6, 867.4]
-    line "x86_64" [862.1, 862.1, 861.9]
+    line "arm64-v8a" [835.9, 835.9, 835.9, 835.9]
+    line "armeabi-v7a" [704.1, 704.1, 703.9, 703.9]
+    line "x86" [867.6, 867.6, 867.4, 867.4]
+    line "x86_64" [862.1, 862.1, 861.9, 861.9]
 ```
