@@ -23,7 +23,7 @@ jobs:
     comment:
         name: comment size report
         if: github.event.workflow_run.conclusion == 'success'
-        runs-on: ${{ vars.SIZE_RUNNER || 'lynx-ubuntu-22.04-medium' }}
+        runs-on: ${{ vars.SIZE_RUNNER || 'ubuntu-22.04' }}
         timeout-minutes: 10
         steps:
             - name: Download Size Result

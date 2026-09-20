@@ -47,7 +47,7 @@ permissions:
 jobs:
     size_check:
         name: android aar size
-        runs-on: ${{ vars.SIZE_RUNNER || 'lynx-ubuntu-22.04-medium' }}
+        runs-on: ${{ vars.SIZE_RUNNER || 'ubuntu-22.04' }}
         timeout-minutes: 45
         steps:
             - name: Python Setup
@@ -135,7 +135,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         permissions:
             contents: write
-        runs-on: ${{ vars.SIZE_RUNNER || 'lynx-ubuntu-22.04-medium' }}
+        runs-on: ${{ vars.SIZE_RUNNER || 'ubuntu-22.04' }}
         timeout-minutes: 10
         steps:
             - name: Download Source
