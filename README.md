@@ -1,40 +1,40 @@
-# skity 产物体积趋势
+# skity binary size trend
 
-> 本分支由 CI 自动更新，请勿手动修改。
+> This branch is updated automatically by CI; do not edit manually.
 
-## 最新快照
+## Latest snapshot
 
-| ABI | 解压后 (B) | 压缩后 (B) |
+| ABI | Uncompressed | Compressed |
 |---|---:|---:|
-| arm64-v8a | 1,755,424 | 855,995 |
-| armeabi-v7a | 1,189,540 | 720,966 |
-| x86 | 1,861,260 | 888,399 |
-| x86_64 | 1,935,648 | 882,748 |
+| arm64-v8a | 1.67 MB | 835.9 KB |
+| armeabi-v7a | 1.13 MB | 704.1 KB |
+| x86 | 1.78 MB | 867.6 KB |
+| x86_64 | 1.85 MB | 862.1 KB |
 
-最新提交：`d5ad6f6cc5`
+Latest commit: `97774c2a3f`
 
-## 解压后体积趋势
+## Uncompressed size trend
 
 ```mermaid
 xychart-beta
-    title "libskity.so 解压后体积 (bytes)"
-    x-axis ["09/20"]
-    y-axis "bytes"
-    line "arm64-v8a" [1755424]
-    line "armeabi-v7a" [1189540]
-    line "x86" [1861260]
-    line "x86_64" [1935648]
+    title "libskity.so uncompressed size (KB)"
+    x-axis ["09/20", "09/20"]
+    y-axis "KB"
+    line "arm64-v8a" [1714.3, 1714.3]
+    line "armeabi-v7a" [1161.7, 1161.7]
+    line "x86" [1817.6, 1817.6]
+    line "x86_64" [1890.3, 1890.3]
 ```
 
-## 压缩后体积趋势
+## Compressed size trend
 
 ```mermaid
 xychart-beta
-    title "libskity.so 压缩后体积 (bytes)"
-    x-axis ["09/20"]
-    y-axis "bytes"
-    line "arm64-v8a" [855995]
-    line "armeabi-v7a" [720966]
-    line "x86" [888399]
-    line "x86_64" [882748]
+    title "libskity.so compressed size (KB)"
+    x-axis ["09/20", "09/20"]
+    y-axis "KB"
+    line "arm64-v8a" [835.9, 835.9]
+    line "armeabi-v7a" [704.1, 704.1]
+    line "x86" [867.6, 867.6]
+    line "x86_64" [862.1, 862.1]
 ```
