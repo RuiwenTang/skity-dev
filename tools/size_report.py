@@ -249,7 +249,12 @@ def BuildRows(current, baseline, max_pct):
         if baseline:
             base = next((item for item in baseline['artifacts']
                          if item['abi'] == cur['abi']), None)
-        for metric, label in (('size', '解压后'), ('compressed', '压缩后')):
+        for metric in ('size', 'compressed'):
+            if metric == 'size':
+                label = 'Uncompressed'
+            else:
+                label = 'Compressed ({})'.format(
+                    cur.get('compressed_basis', ''))
             base_value = base[metric] if base else None
             cur_value = cur[metric]
             delta = cur_value - base_value if base_value is not None else None
@@ -257,7 +262,6 @@ def BuildRows(current, baseline, max_pct):
             rows.append({
                 'abi': cur['abi'],
                 'label': label,
-                'basis': cur.get('compressed_basis') if metric == 'compressed' else '',
                 'base': base_value,
                 'cur': cur_value,
                 'delta': delta,
@@ -268,9 +272,8 @@ def BuildRows(current, baseline, max_pct):
     base_aar = baseline['aar']['size'] if baseline else None
     delta = cur_aar - base_aar if base_aar is not None else None
     rows.append({
-        'abi': 'aar 整包',
-        'label': '文件大小',
-        'basis': '',
+        'abi': 'aar (whole)',
+        'label': 'File size',
         'base': base_aar,
         'cur': cur_aar,
         'delta': delta,
@@ -294,7 +297,7 @@ def RenderRow(row):
 
 def RenderSymbolTable(title, entries, demangler):
     lines = ['<details open>', '<summary>{}</summary>'.format(title), '',
-             '| Δ | 符号 |', '|---:|---|']
+             '| Δ | Symbol |', '|---:|---|']
     for entry in entries:
         lines.append('| {} | `{}` |'.format(
             FmtDelta(entry['delta']),
@@ -304,11 +307,12 @@ def RenderSymbolTable(title, entries, demangler):
 
 
 def RenderReport(current, baseline, rows, symbol_diffs, max_pct, top):
-    lines = [MARKER, '## 📦 二进制体积报告', '']
+    lines = [MARKER, '## 📦 Binary Size Report', '']
     if baseline is None:
-        lines.append('> ⚪ 尚无基线（首次运行或基线缓存过期），本次仅记录绝对体积。')
+        lines.append('> ⚪ No baseline yet (first run or baseline cache '
+                     'evicted); only absolute sizes are reported this time.')
         lines.append('')
-    lines.append('| 产物 | 口径 | 基线 (main) | 本 PR | Δ | 幅度 |')
+    lines.append('| Artifact | Metric | Baseline (main) | This PR | Δ | Change |')
     lines.append('|---|---|---:|---:|---:|---:|')
     for row in rows:
         lines.append(RenderRow(row))
@@ -316,22 +320,23 @@ def RenderReport(current, baseline, rows, symbol_diffs, max_pct, top):
     if baseline is not None:
         for abi, (grown, shrunk) in symbol_diffs.items():
             if not grown and not shrunk:
-                lines.append('<details><summary>符号级增量 · {}（无变化）</summary></details>'.format(abi))
+                lines.append('<details><summary>Symbol-level diff · {} (no changes)</summary></details>'.format(abi))
                 lines.append('')
                 continue
             names = [e['name'] for e in grown] + [e['name'] for e in shrunk]
             demangler = Demangle(names)
             if grown:
                 lines += RenderSymbolTable(
-                    '符号级增量 · {} — 增长 Top {}（解压后口径）'.format(abi, len(grown)),
+                    'Symbol-level diff · {} — top {} grown (uncompressed)'.format(abi, len(grown)),
                     grown, demangler)
             if shrunk:
                 lines += RenderSymbolTable(
-                    '符号级增量 · {} — 缩减 Top {}'.format(abi, len(shrunk)),
+                    'Symbol-level diff · {} — top {} shrunk'.format(abi, len(shrunk)),
                     shrunk, demangler)
         lines.append('---')
-        lines.append('基线：`main@{}` · 阈值 ±{:.2f}% · 完整 nm/bloaty 数据见本次 run 的 Artifacts'.format(
-            baseline.get('head_sha', '')[:8], max_pct))
+        lines.append('Baseline: `main@{}` · threshold ±{:.2f}% · full nm dumps '
+                     'are in the run Artifacts'.format(
+                         baseline.get('head_sha', '')[:8], max_pct))
     lines.append('')
     return '\n'.join(lines)
 
@@ -381,10 +386,11 @@ def RunGit(git_args, check=True):
 def RenderTrendReadme(history):
     abis = sorted({abi for point in history for abi in point['sizes']})
     dates = [point['date'][5:].replace('-', '/') for point in history]
-    lines = ['# skity 产物体积趋势', '',
-             '> 本分支由 CI 自动更新，请勿手动修改。', '',
-             '## 最新快照', '',
-             '| ABI | 解压后 (B) | 压缩后 (B) |', '|---|---:|---:|']
+    lines = ['# skity binary size trend', '',
+             '> This branch is updated automatically by CI; do not edit '
+             'manually.', '',
+             '## Latest snapshot', '',
+             '| ABI | Uncompressed | Compressed |', '|---|---:|---:|']
     latest = history[-1]
     for abi in abis:
         entry = latest['sizes'].get(abi)
@@ -392,7 +398,7 @@ def RenderTrendReadme(history):
             lines.append('| {} | {} | {} |'.format(
                 abi, FmtBytes(entry['size']), FmtBytes(entry['compressed'])))
     lines.append('')
-    lines.append('最新提交：`{}`'.format(latest['sha']))
+    lines.append('Latest commit: `{}`'.format(latest['sha']))
     lines.append('')
 
     def chart_block(title, metric):
@@ -412,13 +418,13 @@ def RenderTrendReadme(history):
         block.append('```')
         return block
 
-    lines.append('## 解压后体积趋势')
+    lines.append('## Uncompressed size trend')
     lines.append('')
-    lines += chart_block('libskity.so 解压后体积 (KB)', 'size')
+    lines += chart_block('libskity.so uncompressed size (KB)', 'size')
     lines.append('')
-    lines.append('## 压缩后体积趋势')
+    lines.append('## Compressed size trend')
     lines.append('')
-    lines += chart_block('libskity.so 压缩后体积 (KB)', 'compressed')
+    lines += chart_block('libskity.so compressed size (KB)', 'compressed')
     lines.append('')
     return '\n'.join(lines)
 
