@@ -61,7 +61,17 @@ def WriteText(path, text):
 
 
 def FmtBytes(value):
-    return '{:,}'.format(value)
+    size = abs(float(value))
+    sign = '-' if value < 0 else ''
+    if size >= 1024 * 1024:
+        return '{}{:.2f} MB'.format(sign, size / 1024 / 1024)
+    if size >= 1024:
+        return '{}{:.1f} KB'.format(sign, size / 1024)
+    return '{}{} B'.format(sign, int(round(size)))
+
+
+def FmtDelta(value):
+    return ('+' if value > 0 else '') + FmtBytes(value)
 
 
 def Esc(text):
@@ -275,7 +285,7 @@ def RenderRow(row):
     if row['delta'] is None:
         delta, pct = 'N/A', 'N/A'
     else:
-        delta = '{:+,}'.format(row['delta'])
+        delta = FmtDelta(row['delta'])
         pct = '{:+.2f}%'.format(row['pct']) if row['pct'] is not None else 'N/A'
     return '| {} | {} | {} | {} | {} {} | {} |'.format(
         Esc(row['abi']), Esc(row['label']), base, FmtBytes(row['cur']),
@@ -286,9 +296,8 @@ def RenderSymbolTable(title, entries, demangler):
     lines = ['<details open>', '<summary>{}</summary>'.format(title), '',
              '| Δ | 符号 |', '|---:|---|']
     for entry in entries:
-        sign = '+' if entry['delta'] > 0 else ''
-        lines.append('| {}{} | `{}` |'.format(
-            sign, FmtBytes(entry['delta']),
+        lines.append('| {} | `{}` |'.format(
+            FmtDelta(entry['delta']),
             Esc(demangler.get(entry['name'], entry['name']))))
     lines += ['</details>', '']
     return lines
@@ -354,8 +363,9 @@ def CmdCompare(args):
     exceeded = [row for row in rows
                 if row['pct'] is not None and abs(row['pct']) > args.max_pct]
     for row in exceeded:
-        print('::warning title=BinarySize::{} {} {:,}B ({:+.2f}%) exceeds '
-              'threshold {:.2f}%'.format(row['abi'], row['label'], row['cur'],
+        print('::warning title=BinarySize::{} {} {} ({:+.2f}%) exceeds '
+              'threshold {:.2f}%'.format(row['abi'], row['label'],
+                                         FmtBytes(row['cur']),
                                          row['pct'], args.max_pct))
     if args.fail and exceeded:
         sys.exit(2)
@@ -379,8 +389,8 @@ def RenderTrendReadme(history):
     for abi in abis:
         entry = latest['sizes'].get(abi)
         if entry:
-            lines.append('| {} | {:,} | {:,} |'.format(
-                abi, entry['size'], entry['compressed']))
+            lines.append('| {} | {} | {} |'.format(
+                abi, FmtBytes(entry['size']), FmtBytes(entry['compressed'])))
     lines.append('')
     lines.append('最新提交：`{}`'.format(latest['sha']))
     lines.append('')
@@ -389,7 +399,7 @@ def RenderTrendReadme(history):
         block = ['```mermaid', 'xychart-beta',
                  '    title "{}"'.format(title),
                  '    x-axis [{}]'.format(', '.join('"{}"'.format(d) for d in dates)),
-                 '    y-axis "bytes"']
+                 '    y-axis "KB"']
         for abi in abis:
             values = []
             last = None
@@ -397,18 +407,18 @@ def RenderTrendReadme(history):
                 entry = point['sizes'].get(abi)
                 if entry:
                     last = entry[metric]
-                values.append(str(last if last is not None else 0))
+                values.append('{:.1f}'.format((last or 0) / 1024.0))
             block.append('    line "{}" [{}]'.format(abi, ', '.join(values)))
         block.append('```')
         return block
 
     lines.append('## 解压后体积趋势')
     lines.append('')
-    lines += chart_block('libskity.so 解压后体积 (bytes)', 'size')
+    lines += chart_block('libskity.so 解压后体积 (KB)', 'size')
     lines.append('')
     lines.append('## 压缩后体积趋势')
     lines.append('')
-    lines += chart_block('libskity.so 压缩后体积 (bytes)', 'compressed')
+    lines += chart_block('libskity.so 压缩后体积 (KB)', 'compressed')
     lines.append('')
     return '\n'.join(lines)
 
