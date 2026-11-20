@@ -612,9 +612,11 @@ if(${SKITY_SW_RENDERER})
     PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_a8_drawable.cc
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_a8_drawable.hpp
-    ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_canvas.cc
-    ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_canvas.hpp
-    ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_edge.cc
+      ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_canvas.cc
+      ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_canvas.hpp
+      ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_coverage_row_buffer.cc
+      ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_coverage_row_buffer.hpp
+      ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_edge.cc
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_edge.hpp
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_raster.cc
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_raster.hpp
