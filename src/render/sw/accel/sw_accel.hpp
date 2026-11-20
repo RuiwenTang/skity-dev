@@ -16,9 +16,11 @@ namespace sw_accel {
 void SaturatedAddRow(const uint8_t* in, uint8_t* out, size_t count,
                      uint8_t alpha);
 
-// Runs SaturatedAddRow over deterministic patterns and checks the result
-// against the scalar reference. Returns false on mismatch.
-bool SelfTest();
+// Known-answer health check over the dispatched SIMD target. Called by the
+// accelerator loading path before the kernels are used (a failed check must
+// disable the accelerator and fall back to the scalar path), and by unit
+// tests. Returns false on mismatch.
+bool Validate();
 
 }  // namespace sw_accel
 }  // namespace skity

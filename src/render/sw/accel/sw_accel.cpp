@@ -22,7 +22,7 @@ void SaturatedAddRow(const uint8_t* in, uint8_t* out, size_t count,
   HWY_DYNAMIC_DISPATCH(SaturatedAddRow)(in, out, count, alpha);
 }
 
-bool SelfTest() {
+bool Validate() {
   uint8_t in[67];
   uint8_t out[67];
   uint8_t expect[67];
