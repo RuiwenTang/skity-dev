@@ -25,7 +25,10 @@ void SWA8Drawable::OnBuildSpan(int x, int y, int width, const uint8_t alpha) {
 
 void SWA8Drawable::Draw(Path const& path, Matrix const& transform) {
   SWRaster raster;
-  raster.RastePath(path, transform, SWRaster::kCullRect, this);
+  raster.RastePath(path, transform, SWRaster::kCullRect);
+  for (Span const& span : raster.CurrentSpans()) {
+    OnBuildSpan(span.x, span.y, span.len, static_cast<uint8_t>(span.cover));
+  }
 }
 
 }  // namespace skity
