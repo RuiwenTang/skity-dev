@@ -139,6 +139,17 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
 | M3 验收 | CPU golden 通道(DisplayList→PNG diff);与 GPU/SwiftShader ±1~2/255 交叉容差 | test-runner 增加 CPU 后端 |
 | M4 扩展 | DisplayList band 并行、AVX-512 评估、mipmap | 基准驱动 |
 
+**M1a 实测记录(2026-11,arm64,commit a4d3cd13)**:
+- 关键教训:第一版把不透明内部段也塞进稠密累计,纯光栅化基准回归 11.5×
+  (BigTriangle 14.9→172μs)——**常量覆盖段必须 O(1) 直发,绝不能逐像素物化**。
+  最终形态为混合表示:AddDirectRun(O(1),legacy 直发语义)+ 稠密 u16 累计,
+  flush 按 x 归并;
+- 交替 A/B 三轮:端到端场景 parity(premul 1804 vs 1818μs;unpremul 场景两侧
+  方差 ±15%,之前的"+6-8% 回归"是测量噪声——**基准结论必须交叉测量**)；
+- 纯光栅微基准 +35%(20.3 vs 15.1μs)= 两段式 flush 每行固定开销 ~6.5ns,
+  接受:M1b kernel 直接吃行缓冲后该路径整体消失；
+- 顺带修复 legacy bug:blit_two_alphas 累计分支把第二像素写到 (x, y+1)。
+
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
 - 合成端(逐像素标量→AVX2 批处理):微基准 8-16×;
