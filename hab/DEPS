@@ -88,6 +88,13 @@ deps = {
         "ignore_in_git": True,
         "commit": "0af55ccecd98d4e5a8d1fad7de25ba429d60e863",
     },
+    "third_party/highway": {
+        "type": "git",
+        "url": "https://github.com/google/highway.git",
+        # Highway 1.4.0.
+        "ignore_in_git": True,
+        "commit": "ab219f9ecac8bc7e97d4c2b3b8197e52b48a5b52",
+    },
     "third_party/pugixml": {
         "type": "git",
         "url": "https://github.com/zeux/pugixml.git",

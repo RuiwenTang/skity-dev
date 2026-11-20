@@ -8,6 +8,17 @@ option(SKITY_HW_RENDERER "option for gpu raster" ON)
 option(SKITY_SW_RENDERER "option for cpu raster" ON)
 option(SKITY_GL_BACKEND "option for opengl backend" ON)
 
+# Highway-backed SIMD accelerator for the software renderer. Size-sensitive
+# builds turn this off and fall back to the scalar path; requires the
+# third_party/highway habitat dependency to be synced.
+# See docs/CPU_RENDERER_RESEARCH.md (decisions 2 and 7).
+cmake_dependent_option(
+  SKITY_SW_ACCEL "option for the Highway-backed SW accelerator"
+  ON
+  SKITY_SW_RENDERER
+  OFF
+)
+
 # option for metal raster open on APPLE platform by default
 # User can pass -DSKITY_MTL_BACKEND=OFF to disable metal backend if needed
 cmake_dependent_option(
