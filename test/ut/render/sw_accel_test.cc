@@ -9,7 +9,7 @@
 #include "src/render/sw/accel/sw_accel.hpp"
 
 TEST(SWAccel, HighwayDispatchWorks) {
-  EXPECT_TRUE(skity::sw_accel::SelfTest());
+  EXPECT_TRUE(skity::sw_accel::Validate());
 }
 
 #endif  // SKITY_SW_ACCEL
