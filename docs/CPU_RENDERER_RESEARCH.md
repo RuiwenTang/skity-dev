@@ -61,22 +61,22 @@ skity 格式维度塌缩后组合数仅 ~1300,静态模板可展开 → **不需
      `-fno-exceptions` 工程需额外定义 `HWY_DISABLE_EXCEPTIONS`。
 3. **管线结构**:两段式(fetch→span→composite)为主——gradient/pattern 走 span buffer;**solid/文字(A8 mask)/boxA 走一段式特例**(solid 常量进寄存器);SrcCopy+solid→memset、SrcCopy+对齐 blit→memcpy 特例保留。signature dispatch + context 级 16 项 SIMD 查找缓存照搬。
 4. **多线程**:SSR 主答案 = **进程级并发(每请求单线程渲染)**,DisplayList 录制/回放分离已是现状,零新增机制;band 级并行(DisplayList 重放重入)二期做。
-7. **打包分层(2026-11 定稿)**:kernel 管线做成**可选加速器**,核心库永远只带旧路径
-   (零增量)+ 探测胶水。三档体积:0(legacy)/ ~30-60KB(slim 单目标)/
+7. **打包分层(2026-11 定稿,dlopen 已剔除)**:kernel 管线做成**编译期可选加速器**,
+   核心库永远只带旧路径(零增量)。三档体积:0(legacy)/ ~30-60KB(slim 单目标)/
    ~100-500KB(多目标,服务器构建裁 AVX3 家族后 ~100-200KB)。
    实际平台版图(Linux/Windows 源码编译无体积约束):
-   - Linux/Windows:默认编入 full 变体;SSR 将来要按宿主 CPU 代际分发时,
-     同一 seam 直接加 .so,暂不做;
+   - Linux/Windows:默认编入 full 变体;
    - iOS:podspec subspec 编译期裁剪;
-   - Android:**双 AAR 产物**(base / accel)编译期控制,宿主选依赖;纯拆 .so
-     不省体积(APK 仍计入),DFM 按需下发才真省但要求宿主 module 化,不作首选;
+   - Android:**双 AAR 产物**(base / accel = 整库两档编译)编译期控制;
    - 实现红线:编译期裁剪必须**排除源文件出编译**(kernel 被函数表引用,
-     dead-strip 剥不掉);.so 方案保留为 seam 的可选包装,当前无启用场景。
-   ABI:单入口 C 接口 + vtable + abi_version,调用粒度整段 fill-row(fetch 参数
-   POD 化);.so 内 Highway 符号 hidden 防进程内符号冲突;Linux 下 accel .so
-   静态链 libstdc++。旧 brush 路径定位 compatibility-only 冻结,目标态下线,
-   体积档位最终只由 Highway 编译目标数表达;注意回退档存在功能降级
-   (advanced blend),需写进接口文档。
+     dead-strip 剥不掉)。
+   **内部结构(精简后)**:不做 C ABI/vtable/加载胶水/POD 序列化——skity_sw_accel
+   静态编入,直接 C++ 调用;dispatch 就是 `kernel_table[kBlendMode]` 函数指针数组,
+   无需 signature 缓存;`Validate()` 保留为**首帧保险丝**(std::call_once,失败禁用
+   加速器回退旧路径):一份二进制分发到异构 KVM 机群,CI 无法覆盖所有目标副本
+   (如 AVX-512 副本),首帧校验的正是本机将执行的那份副本。将来的正交补充:CI
+   目标矩阵(DisableTargets 逐副本压测)。旧 brush 路径定位 compatibility-only
+   冻结,目标态下线;注意回退档存在功能降级(advanced blend),需写进接口文档。
 5. **光栅化器**:保留现有 `sw_raster`(AOSP 扫描线,梯形解析覆盖,与 cell 法信息量等价,中段天然 CMask 快路径),**重写消费端**。
 6. **格式约定**:内部强制 premul RGBA8888;unpremul 只在导出边界一次性转换。
 
@@ -132,8 +132,9 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   `FlushTo` 适配器再生 `vector<Span>`,**下游(clip/brush/blend)零改动**;
   顺带删 per-trapezoid 堆分配、全宽清零、`edges_too_close` 兜底、死代码 delegate |
   现有 sw_canvas_test 5 用例 + 新旧 builder 逐行等价性单测(迁移期) |
-| M1b 内核 | Highway 接入 + 28 BlendMode kernel 直接吃行缓冲 + signature dispatch +
-  premul 强制;删除 FlushTo 适配器与 BrushH 逐像素路径 |
+| M1b 内核 | Highway 接入 + 28 BlendMode kernel(先吃 post-clip runs)+ 函数表 dispatch +
+  Validate 首帧保险丝 + premul 强制;kernel 直连行缓冲与 BrushH 逐像素路径的删除
+  随 M2 clip mask 化落地 |
   三实现互拍单测 + `test/bench/micro/sw_benchmarks.cc` 前后对比 |
 | M2 结构 | raster clip、glyph A8 atlas、cubic 采样 | unit + 文字基准 |
 | M3 验收 | CPU golden 通道(DisplayList→PNG diff);与 GPU/SwiftShader ±1~2/255 交叉容差 | test-runner 增加 CPU 后端 |
