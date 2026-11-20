@@ -89,6 +89,7 @@ add_executable(skity_unit_test
     io/pixmap_test.cc
     render/canvas_state_test.cc
     render/sw_canvas_test.cc
+    render/sw_accel_test.cc
     render/sw_coverage_test.cc
     render/hw/hw_buffer_layout_test.cc
     render/hw/coverage_aa_line_encoder_test.cc
@@ -170,6 +171,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AN
       SKITY_TEST_FONT_MANAGER_NO_DEFAULT=1
       SKITY_TEST_FONT_ROOT="${CMAKE_SOURCE_DIR}/test/fonts/resources")
   endif()
+endif()
+
+if(TARGET skity_sw_accel)
+  target_link_libraries(skity_unit_test PRIVATE skity_sw_accel)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND SKITY_CT_FONT)

@@ -183,6 +183,44 @@ if(${SKITY_SW_RENDERER})
   target_compile_definitions(skity PUBLIC -DSKITY_CPU)
 endif()
 
+# Highway-backed SIMD accelerator for the software renderer. Kept as its own
+# static library so size-sensitive packagings can exclude it entirely; the
+# renderer falls back to the scalar path when it is absent. Only the three
+# Highway runtime sources are compiled (targets/per_target/abort); the
+# optional utility objects (timer, stats, profiler, ...) are not needed.
+if(${SKITY_SW_ACCEL})
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/highway/hwy/highway.h")
+    add_library(skity_sw_accel STATIC
+      third_party/highway/hwy/targets.cc
+      third_party/highway/hwy/per_target.cc
+      third_party/highway/hwy/abort.cc
+      src/render/sw/accel/sw_accel.cpp
+    )
+    target_include_directories(skity_sw_accel
+      PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/highway
+    )
+    set_target_properties(skity_sw_accel PROPERTIES
+      CXX_STANDARD 17
+      POSITION_INDEPENDENT_CODE ON
+    )
+    # Keep the Highway namespace internal to the library; only skity entry
+    # points should remain visible in dynamic symbol tables.
+    if(NOT MSVC)
+      target_compile_options(skity_sw_accel PRIVATE -fvisibility=hidden)
+    endif()
+    target_link_libraries(skity PRIVATE skity_sw_accel)
+    target_compile_definitions(skity PUBLIC -DSKITY_SW_ACCEL=1)
+  else()
+    message(STATUS
+      "SKITY_SW_ACCEL is ON but third_party/highway is missing; "
+      "disable the option or sync habitat dependencies. Building without "
+      "the accelerator.")
+    set(SKITY_SW_ACCEL OFF CACHE BOOL "option for the Highway-backed SW accelerator" FORCE)
+  endif()
+endif()
+
 target_compile_definitions(skity PRIVATE -DDISABLE_SKITY_EXPERIMENTAL_WARNINGS)
 
 # Shared C-ABI foundation for module-owned C surfaces: the handle
