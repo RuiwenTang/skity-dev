@@ -12,141 +12,10 @@
 #include <skity/geometry/stroke.hpp>
 
 #include "src/logging.hpp"
+#include "src/render/sw/sw_coverage_row_buffer.hpp"
 #include "src/tracing.hpp"
 
 namespace skity {
-
-void RealSpanBuilder::BuildSpan(int x, int y, const uint8_t alpha) {
-  if (y < scan_bounds_.Top()) {
-    return;
-  }
-  BuildSpan(x, y, 1, alpha);
-}
-
-void RealSpanBuilder::BuildSpan(int x, int y, int width, const uint8_t alpha) {
-  if (y < scan_bounds_.Top()) {
-    return;
-  }
-
-  if (delegate_) {
-    delegate_->OnBuildSpan(x, y, width, alpha);
-  }
-
-  Span span{
-      x,
-      y,
-      width,
-      alpha,
-  };
-  spans_.push_back(span);
-}
-
-void RealSpanBuilder::BuildSpans(int x, int y, const uint8_t antialias[],
-                                 int len) {
-  if (y < scan_bounds_.Top()) {
-    return;
-  }
-  for (int i = 0; i < len; i++) {
-    BuildSpan(x + i, y, 1, antialias[i]);
-  }
-}
-
-inline static Alpha safely_add_alpha(Alpha alpha, Alpha delta) {
-  if (static_cast<uint16_t>(alpha) + static_cast<uint16_t>(delta) > 255) {
-    return 255;
-  } else {
-    return alpha + delta;
-  }
-}
-
-void SpanBuilder::BuildSpan(int x, int y, const uint8_t alpha) {
-  if (y < scan_bounds_.Top()) {
-    return;
-  }
-  FlushYIfNeed(y);
-  int offset = x - left_;
-  alphas_[offset] = safely_add_alpha(alphas_[offset], alpha);
-}
-
-void SpanBuilder::BuildSpan(int x, int y, int width, const uint8_t alpha) {
-  if (y < scan_bounds_.Top()) {
-    return;
-  }
-  FlushYIfNeed(y);
-  int offset = x - left_;
-  for (int i = 0; i < width; i++) {
-    alphas_[offset + i] = safely_add_alpha(alphas_[offset + i], alpha);
-  }
-}
-
-void SpanBuilder::BuildSpans(int x, int y, const uint8_t antialias[], int len) {
-  if (y < scan_bounds_.Top()) {
-    return;
-  }
-  FlushYIfNeed(y);
-  int offset = x - left_;
-  for (int i = 0; i < len; i++) {
-    alphas_[offset + i] = safely_add_alpha(alphas_[offset + i], antialias[i]);
-  }
-}
-
-void SpanBuilder::FlushYIfNeed(int new_y) {
-  if (curr_y_ == new_y) {
-    return;
-  }
-
-  if (curr_y_ == SW_NaN32) {
-    curr_y_ = new_y;
-    return;
-  }
-
-  Flush();
-  alphas_.assign(alphas_.size(), 0);
-  curr_y_ = new_y;
-}
-
-void SpanBuilder::Flush() {
-  if (curr_y_ == SW_NaN32) {
-    return;
-  }
-  size_t curr = 0;
-  size_t alpha_size = alphas_.size();
-  while (curr < alpha_size) {
-    if (alphas_[curr] > 0) {
-      size_t start = curr;
-      size_t width = 1;
-      Alpha curr_alpha = alphas_[curr];
-      do {
-        curr++;
-        if (curr >= alpha_size) {
-          break;
-        }
-
-        if (alphas_[curr] == curr_alpha) {
-          width++;
-        } else {
-          break;
-        }
-      } while (alphas_[curr]);
-      real_span_builder_.BuildSpan(left_ + start, curr_y_, width, curr_alpha);
-    } else {
-      curr++;
-    }
-  }
-}
-
-// Return true if prev->fX, next->fX are too close in the current pixel row.
-static bool edges_too_close(SWEdge* prev, SWEdge* next, SWFixed lowerY) {
-  constexpr SWFixed SLACK = SW_Fixed1;
-  return next && prev && next->upper_y < lowerY &&
-         prev->x + SLACK >= next->x - std::abs(next->dx);
-}
-
-// This function exists for the case where the previous rite edge is removed
-// because its fLowerY <= next_y
-static bool edges_too_close(int prevRite, SWFixed ul, SWFixed ll) {
-  return prevRite > SWFixedFloorToInt(ul) || prevRite > SWFixedFloorToInt(ll);
-}
 
 static Alpha get_partial_alpha(Alpha alpha, SWFixed partialHeight) {
   return static_cast<Alpha>(SWFixedRoundToInt(alpha * partialHeight));
@@ -277,35 +146,41 @@ static Alpha partial_triangle_to_alpha(SWFixed a, SWFixed b) {
   return static_cast<Alpha>((area >> 8) & 0xFF);
 }
 
-// Note that if fullAlpha != 0xFF, we'll multiply alpha by fullAlpha
-static void blit_single_alpha(SpanBuilder* span_builder, int y, int x,
-                              Alpha alpha, Alpha fullAlpha,
-                              bool no_real_span_builder) {
-  if (fullAlpha == 0xFF && !no_real_span_builder) {
-    span_builder->GetRealSpanBuilder()->BuildSpan(x, y, alpha);
+// Scales a partial-triangle alpha by the sub-scanline height. Matches the
+// legacy direct-emission path which skipped the multiplication at full alpha.
+static inline Alpha scale_partial_alpha(Alpha alpha, Alpha fullAlpha) {
+  return fullAlpha == 0xFF ? alpha : get_partial_alpha(alpha, fullAlpha);
+}
+
+static void blit_single_alpha(CoverageRowBuffer* buffer, int y, int x,
+                              Alpha alpha, Alpha fullAlpha) {
+  alpha = scale_partial_alpha(alpha, fullAlpha);
+  if (fullAlpha == 0xFF) {
+    buffer->AddDirectRun(x, y, 1, alpha);
   } else {
-    span_builder->BuildSpan(x, y, get_partial_alpha(alpha, fullAlpha));
+    buffer->AddRun(x, y, 1, alpha);
   }
 }
 
-static void blit_two_alphas(SpanBuilder* span_builder, int y, int x, Alpha a1,
-                            Alpha a2, Alpha fullAlpha,
-                            bool no_real_span_builder) {
-  if (fullAlpha == 0xFF && !no_real_span_builder) {
-    span_builder->GetRealSpanBuilder()->BuildSpan(x, y, a1);
-    span_builder->GetRealSpanBuilder()->BuildSpan(x + 1, y, a2);
+static void blit_two_alphas(CoverageRowBuffer* buffer, int y, int x, Alpha a1,
+                            Alpha a2, Alpha fullAlpha) {
+  a1 = scale_partial_alpha(a1, fullAlpha);
+  a2 = scale_partial_alpha(a2, fullAlpha);
+  if (fullAlpha == 0xFF) {
+    buffer->AddDirectRun(x, y, 1, a1);
+    buffer->AddDirectRun(x + 1, y, 1, a2);
   } else {
-    span_builder->BuildSpan(x, y, a1);
-    span_builder->BuildSpan(x + 1, y, a2);
+    buffer->AddRun(x, y, 1, a1);
+    buffer->AddRun(x + 1, y, 1, a2);
   }
 }
 
-static void blit_full_alpha(SpanBuilder* span_builder, int y, int x, int len,
-                            Alpha fullAlpha, bool no_real_span_builder) {
-  if (fullAlpha == 0xFF && !no_real_span_builder) {
-    span_builder->GetRealSpanBuilder()->BuildSpan(x, y, len, fullAlpha);
+static void blit_full_alpha(CoverageRowBuffer* buffer, int y, int x, int len,
+                            Alpha fullAlpha) {
+  if (fullAlpha == 0xFF) {
+    buffer->AddDirectRun(x, y, len, fullAlpha);
   } else {
-    span_builder->BuildSpan(x, y, len, fullAlpha);
+    buffer->AddRun(x, y, len, fullAlpha);
   }
 }
 
@@ -367,37 +242,35 @@ static void compute_alpha_below_line(Alpha* alphas, SWFixed l, SWFixed r,
   }
 }
 
-static void blit_aaa_trapezoid_row(SpanBuilder* span_builder, int y, SWFixed ul,
-                                   SWFixed ur, SWFixed ll, SWFixed lr,
-                                   SWFixed lDY, SWFixed rDY, Alpha fullAlpha,
-                                   bool no_real_span_builder) {
+static void blit_aaa_trapezoid_row(CoverageRowBuffer* buffer, int y,
+                                   SWFixed ul, SWFixed ur, SWFixed ll,
+                                   SWFixed lr, SWFixed lDY, SWFixed rDY,
+                                   Alpha fullAlpha) {
   int L = SWFixedFloorToInt(ul), R = SWFixedCeilToInt(lr);
   int len = R - L;
   if (len == 1) {
     Alpha alpha = trapezoid_to_alpha(ur - ul, lr - ll);
-    blit_single_alpha(span_builder, y, L, alpha, fullAlpha,
-                      no_real_span_builder);
+    blit_single_alpha(buffer, y, L, alpha, fullAlpha);
     return;
   }
 
   const int kQuickLen = 31;
-  char quickMemory[(sizeof(Alpha) * 2 + sizeof(int16_t)) * (kQuickLen + 1)];
+  Alpha quickMemory[(kQuickLen + 1) * 2];
   Alpha* alphas;
+  std::vector<Alpha> heapAlphas;
 
   if (len <= kQuickLen) {
-    alphas = reinterpret_cast<Alpha*>(quickMemory);
+    alphas = quickMemory;
   } else {
-    alphas = new Alpha[(len + 1) * (sizeof(Alpha) * 2 + sizeof(int16_t))];
+    heapAlphas.resize(static_cast<size_t>(len + 1) * 2);
+    alphas = heapAlphas.data();
   }
 
   Alpha* tempAlphas = alphas + len + 1;
-  int16_t* runs = reinterpret_cast<int16_t*>((alphas + (len + 1) * 2));
 
   for (int i = 0; i < len; ++i) {
-    runs[i] = 1;
     alphas[i] = fullAlpha;
   }
-  runs[len] = 0;
 
   int uL = SWFixedFloorToInt(ul);
   int lL = SWFixedCeilToInt(ll);
@@ -443,21 +316,20 @@ static void blit_aaa_trapezoid_row(SpanBuilder* span_builder, int y, SWFixed ul,
     }
   }
 
-  if (fullAlpha == 0xFF && !no_real_span_builder) {
-    span_builder->GetRealSpanBuilder()->BuildSpans(L, y, alphas, len);
+  if (fullAlpha == 0xFF) {
+    for (int i = 0; i < len; ++i) {
+      if (alphas[i] != 0) {
+        buffer->AddDirectRun(L + i, y, 1, alphas[i]);
+      }
+    }
   } else {
-    span_builder->BuildSpans(L, y, alphas, len);
-  }
-
-  if (len > kQuickLen) {
-    delete[] alphas;
+    buffer->AddAlphas(L, y, alphas, len);
   }
 }
 
-static void blit_trapezoid_row(SpanBuilder* span_builder, int y, SWFixed ul,
+static void blit_trapezoid_row(CoverageRowBuffer* buffer, int y, SWFixed ul,
                                SWFixed ur, SWFixed ll, SWFixed lr, SWFixed lDY,
-                               SWFixed rDY, Alpha fullAlpha,
-                               bool no_real_span_builder = false) {
+                               SWFixed rDY, Alpha fullAlpha) {
   DEBUG_CHECK(lDY >= 0 &&
               rDY >= 0);  // We should only send in the absolte value
 
@@ -496,8 +368,7 @@ static void blit_trapezoid_row(SpanBuilder* span_builder, int y, SWFixed ul,
       if (len == 1) {
         // In this case, ul and ll pass through the same pixel
         Alpha alpha = trapezoid_to_alpha(joinLeft - ul, joinLeft - ll);
-        blit_single_alpha(span_builder, y, ul >> 16, alpha, fullAlpha,
-                          no_real_span_builder);
+        blit_single_alpha(buffer, y, ul >> 16, alpha, fullAlpha);
       } else if (len == 2) {
         // In this case, ul and ll pass through two pixels, first is the size
         // from ul to ceil(ul), second is the size from floor(ll) to ll, and
@@ -507,44 +378,39 @@ static void blit_trapezoid_row(SpanBuilder* span_builder, int y, SWFixed ul,
         SWFixed second = ll - ul - first;
         Alpha a1 = partial_triangle_to_alpha(first, lDY);
         Alpha a2 = fullAlpha - partial_triangle_to_alpha(second, lDY);
-        blit_two_alphas(span_builder, y, ul >> 16, a1, a2, fullAlpha,
-                        no_real_span_builder);
+        blit_two_alphas(buffer, y, ul >> 16, a1, a2, fullAlpha);
       } else {
-        blit_aaa_trapezoid_row(span_builder, y, ul, joinLeft, ll, joinLeft, lDY,
-                               SW_MaxS32, fullAlpha, no_real_span_builder);
+        blit_aaa_trapezoid_row(buffer, y, ul, joinLeft, ll, joinLeft, lDY,
+                               SW_MaxS32, fullAlpha);
       }
     }
     if (joinLeft < joinRite) {
-      blit_full_alpha(span_builder, y, SWFixedFloorToInt(joinLeft),
-                      SWFixedFloorToInt(joinRite - joinLeft), fullAlpha,
-                      no_real_span_builder);
+      blit_full_alpha(buffer, y, SWFixedFloorToInt(joinLeft),
+                      SWFixedFloorToInt(joinRite - joinLeft), fullAlpha);
     }
     if (lr > joinRite) {
       int len = SWFixedCeilToInt(lr - joinRite);
       if (len == 1) {
         Alpha alpha = trapezoid_to_alpha(ur - joinRite, lr - joinRite);
-        blit_single_alpha(span_builder, y, joinRite >> 16, alpha, fullAlpha,
-                          no_real_span_builder);
+        blit_single_alpha(buffer, y, joinRite >> 16, alpha, fullAlpha);
       } else if (len == 2) {
         SWFixed first = joinRite + SW_Fixed1 - ur;
         SWFixed second = lr - ur - first;
         Alpha a1 = fullAlpha - partial_triangle_to_alpha(first, rDY);
         Alpha a2 = partial_triangle_to_alpha(second, rDY);
-        blit_two_alphas(span_builder, y, joinRite >> 16, a1, a2, fullAlpha,
-                        no_real_span_builder);
+        blit_two_alphas(buffer, y, joinRite >> 16, a1, a2, fullAlpha);
       } else {
-        blit_aaa_trapezoid_row(span_builder, y, joinRite, ur, joinRite, lr,
-                               SW_MaxS32, rDY, fullAlpha, no_real_span_builder);
+        blit_aaa_trapezoid_row(buffer, y, joinRite, ur, joinRite, lr,
+                               SW_MaxS32, rDY, fullAlpha);
       }
     }
   } else {
-    blit_aaa_trapezoid_row(span_builder, y, ul, ur, ll, lr, lDY, rDY, fullAlpha,
-                           no_real_span_builder);
+    blit_aaa_trapezoid_row(buffer, y, ul, ur, ll, lr, lDY, rDY, fullAlpha);
   }
 }
 
 void WalkEdges(SWEdge* prev_head, SWEdge* next_tail,
-               Path::PathFillType fill_type, SpanBuilder* span_builder,
+               Path::PathFillType fill_type, CoverageRowBuffer* buffer,
                int start_y, int stop_y, SWFixed left_clip, SWFixed right_clip) {
   prev_head->x = prev_head->upper_x = left_clip;
   next_tail->x = next_tail->upper_x = right_clip;
@@ -573,9 +439,6 @@ void WalkEdges(SWEdge* prev_head, SWEdge* next_tail,
     SWEdge* left_edge = prev_head;
     SWFixed left = left_clip;
     SWFixed left_dy = 0;
-    // The x value of the previous right side. It is used to calculate whether
-    // edges are too close
-    int prev_right = SWFixedFloorToInt(left_clip);
     next_next_y = SW_MaxS32;
     // The y_shift here is used to calculate the x value during GoY(). If
     // next_y is 1, then x = x + dx, if it is not an integer, x = x + dx >>
@@ -611,13 +474,8 @@ void WalkEdges(SWEdge* prev_head, SWEdge* next_tail,
         SWFixed next_left = std::max(left_clip, left_edge->x);
         SWFixed next_right = std::min(right_clip, curr_edge->x);
         SWFixed right_dy = curr_edge->dy;
-        blit_trapezoid_row(
-            span_builder, y >> 16, left, right, next_left, next_right, left_dy,
-            right_dy, full_alpha,
-            (full_alpha == 0xFF &&
-             (edges_too_close(prev_right, left, left_edge->x) ||
-              edges_too_close(curr_edge, curr_edge->next, next_y))));
-        prev_right = SWFixedCeilToInt(std::max(right, curr_edge->x));
+        blit_trapezoid_row(buffer, y >> 16, left, right, next_left, next_right,
+                           left_dy, right_dy, full_alpha);
       } else {
         curr_edge->GoY(next_y, y_shift);
       }
@@ -658,11 +516,9 @@ void WalkEdges(SWEdge* prev_head, SWEdge* next_tail,
 
     // was our right-edge culled away?
     if (in_interval) {
-      blit_trapezoid_row(
-          span_builder, y >> 16, left, right_clip,
-          std::max(left_clip, left_edge->x), right_clip, left_dy, 0, full_alpha,
-          full_alpha == 0xFF &&
-              edges_too_close(left_edge->prev, left_edge, next_y));
+      blit_trapezoid_row(buffer, y >> 16, left, right_clip,
+                         std::max(left_clip, left_edge->x), right_clip, left_dy,
+                         0, full_alpha);
     }
 
     y = next_y;
@@ -729,8 +585,7 @@ static void ProcessEdges(std::vector<std::unique_ptr<SWEdge>>& edges,
 }
 
 void SWRaster::RastePath(Path const& path, Matrix const& transform,
-                         const Rect& clip_bounds,
-                         SpanBuilderDelegate* span_builder_delegate) {
+                         const Rect& clip_bounds) {
   SKITY_TRACE_EVENT(SWRaster_RastePath);
 
   Paint paint;
@@ -767,8 +622,9 @@ void SWRaster::RastePath(Path const& path, Matrix const& transform,
   int stop_y;
   SWFixed left_bound;
   SWFixed right_bound;
-  SpanBuilder span_builder(bounds_.Left(), bounds_.Width(), scan_bounds,
-                           span_builder_delegate);
+  CoverageRowBuffer coverage_buffer(static_cast<int>(scan_bounds.Left()),
+                                    static_cast<int>(scan_bounds.Width()),
+                                    static_cast<int>(scan_bounds.Top()));
 
   // It makes more sense to start scanning from scan_bounds.Top(), but currently
   // WalkEdges does not support it. If we start from scan_bounds.Top(), the
@@ -779,10 +635,9 @@ void SWRaster::RastePath(Path const& path, Matrix const& transform,
   left_bound = static_cast<uint32_t>(scan_bounds.Left()) << 16;
   right_bound = static_cast<uint32_t>(scan_bounds.Right()) << 16;
 
-  WalkEdges(&head, &tail, path.GetFillType(), &span_builder, start_y, stop_y,
-            left_bound, right_bound);
-  span_builder.Flush();
-  spans_ = span_builder.TakeSpans();
+  WalkEdges(&head, &tail, path.GetFillType(), &coverage_buffer, start_y,
+            stop_y, left_bound, right_bound);
+  spans_ = coverage_buffer.TakeSpans();
 }
 
 }  // namespace skity

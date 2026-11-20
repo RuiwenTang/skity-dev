@@ -15,7 +15,7 @@
 
 namespace skity {
 
-struct SWA8Drawable : public SpanBuilderDelegate {
+struct SWA8Drawable {
  public:
   explicit SWA8Drawable(std::shared_ptr<Pixmap> pixmap)
       : pixmap_(pixmap),
@@ -24,7 +24,8 @@ struct SWA8Drawable : public SpanBuilderDelegate {
     assert(pixmap_->GetColorType() == ColorType::kA8);
   }
 
-  void OnBuildSpan(int x, int y, int width, const uint8_t alpha) override;
+  // Fills one rasterized run into the A8 mask.
+  void OnBuildSpan(int x, int y, int width, const uint8_t alpha);
 
   void Draw(Path const& path, Matrix const& transform);
 

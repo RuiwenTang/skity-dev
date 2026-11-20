@@ -8,66 +8,20 @@
 #include <vector>
 
 #include "src/render/sw/sw_coverage_row_buffer.hpp"
-#include "src/render/sw/sw_raster.hpp"
 
 namespace {
 
 using skity::CoverageRowBuffer;
 using skity::Span;
-using skity::SpanBuilder;
 
 constexpr int kLeft = 5;
 constexpr int kWidth = 40;
 constexpr int kTop = 3;
 
-// CoverageRowBuffer is the drop-in replacement for the accumulation side of
-// the legacy builder pair; these tests pin the equivalence against
-// SpanBuilder (the legacy dense accumulation + Flush path) and cover the
-// semantics the legacy path could not express (x clipping instead of OOB
-// writes, dirty-extent reuse).
-
-uint32_t NextRandom(uint32_t& state) {
-  state ^= state << 13;
-  state ^= state >> 17;
-  state ^= state << 5;
-  return state;
-}
-
-struct Op {
-  enum Kind { kRun, kAlphas } kind;
-  int x;
-  int y;
-  int len;
-  uint8_t alpha;
-  std::vector<uint8_t> alphas;
-};
-
-std::vector<Span> ApplyToLegacy(const std::vector<Op>& ops) {
-  SpanBuilder legacy(kLeft, kWidth, skity::Rect::MakeXYWH(kLeft, kTop, kWidth, 64),
-                     nullptr);
-  for (const Op& op : ops) {
-    if (op.kind == Op::kRun) {
-      legacy.BuildSpan(op.x, op.y, op.len, op.alpha);
-    } else {
-      legacy.BuildSpans(op.x, op.y, op.alphas.data(), op.len);
-    }
-  }
-  // SWRaster::RastePath flushes explicitly before taking the spans.
-  legacy.Flush();
-  return legacy.TakeSpans();
-}
-
-std::vector<Span> ApplyToBuffer(const std::vector<Op>& ops) {
-  CoverageRowBuffer buffer(kLeft, kWidth, kTop);
-  for (const Op& op : ops) {
-    if (op.kind == Op::kRun) {
-      buffer.AddRun(op.x, op.y, op.len, op.alpha);
-    } else {
-      buffer.AddAlphas(op.x, op.y, op.alphas.data(), op.len);
-    }
-  }
-  return buffer.TakeSpans();
-}
+// CoverageRowBuffer replaced the legacy RealSpanBuilder/SpanBuilder pair as
+// the rasterizer's single emission sink. Equivalence to the legacy
+// accumulation path was pinned by randomized differential tests while both
+// implementations existed; these tests cover the semantics directly.
 
 void ExpectSpanListsEqual(const std::vector<Span>& expected,
                           const std::vector<Span>& actual) {
@@ -85,40 +39,6 @@ std::vector<Span> Spans(std::initializer_list<Span> spans) {
 }
 
 }  // namespace
-
-TEST(SWCoverageRowBuffer, MatchesLegacySpanBuilderOnRandomSequences) {
-  uint32_t state = 0x12345678u;
-  // Random op streams over a few device rows. Rows are generated in
-  // non-decreasing y order (the rasterizer walker is monotonic). x stays
-  // inside the buffer because the legacy builder has no bounds clipping
-  // (out-of-range x is UB there); the clipping behavior of the new buffer is
-  // covered by SWCoverageRowBuffer.ClipsOutOfRangePixels below.
-  for (int round = 0; round < 8; round++) {
-    std::vector<Op> ops;
-    int y = kTop - 2;  // exercises the dropped-rows path first
-    for (int i = 0; i < 400; i++) {
-      if (NextRandom(state) % 37 == 0) {
-        y++;
-      }
-      Op op{};
-      op.y = y;
-      op.len = static_cast<int>(NextRandom(state) % 20) + 1;
-      op.x = kLeft + static_cast<int>(NextRandom(state) % (kWidth - 20));
-      if (NextRandom(state) % 3 == 0) {
-        op.kind = Op::kAlphas;
-        op.alphas.resize(op.len);
-        for (int j = 0; j < op.len; j++) {
-          op.alphas[j] = static_cast<uint8_t>(NextRandom(state) % 256);
-        }
-      } else {
-        op.kind = Op::kRun;
-        op.alpha = static_cast<uint8_t>(NextRandom(state) % 256);
-      }
-      ops.push_back(op);
-    }
-    ExpectSpanListsEqual(ApplyToLegacy(ops), ApplyToBuffer(ops));
-  }
-}
 
 TEST(SWCoverageRowBuffer, ClampsCoverageAndMergesEqualRuns) {
   CoverageRowBuffer buffer(kLeft, kWidth, kTop);
@@ -161,6 +81,24 @@ TEST(SWCoverageRowBuffer, ClipsOutOfRangePixels) {
   std::vector<Span> spans = buffer.TakeSpans();
   ExpectSpanListsEqual(
       Spans({Span{kLeft, 5, 8, 80}, Span{kLeft, 6, kWidth, 80}}), spans);
+}
+
+TEST(SWCoverageRowBuffer, MergesDirectRunsWithDenseCoverage) {
+  CoverageRowBuffer buffer(kLeft, kWidth, kTop);
+  // Partial sub-scanline edges accumulate densely; the opaque interior is a
+  // direct run; the flush merges both in ascending x order.
+  buffer.AddRun(6, 5, 2, 64);
+  buffer.AddDirectRun(8, 5, 4, 255);
+  buffer.AddRun(12, 5, 2, 128);
+  // Adjacent equal direct runs merge, in AddDirectRun and in the flush.
+  buffer.AddDirectRun(20, 5, 2, 255);
+  buffer.AddDirectRun(22, 5, 3, 255);
+
+  std::vector<Span> spans = buffer.TakeSpans();
+  ExpectSpanListsEqual(
+      Spans({Span{6, 5, 2, 64}, Span{8, 5, 4, 255}, Span{12, 5, 2, 128},
+             Span{20, 5, 5, 255}}),
+      spans);
 }
 
 TEST(SWCoverageRowBuffer, EmptyTakeSpans) {
