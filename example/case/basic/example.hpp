@@ -8,6 +8,15 @@
 #include <skity/skity.hpp>
 
 namespace skity::example::basic {
+// Individual scene sections, also drawn (with the same transforms) by
+// draw_canvas; exposed for per-section benchmarking of the software backend.
+void draw_basic_example(skity::Canvas* canvas);
+void draw_path_effect_example(skity::Canvas* canvas);
+void draw_dash_start_example(skity::Canvas* canvas);
+void draw_simple_text(skity::Canvas* canvas);
+void draw_linear_gradient_example(skity::Canvas* canvas);
+void draw_even_odd_fill(skity::Canvas* canvas);
+
 void draw_canvas(skity::Canvas* canvas);
 }
 

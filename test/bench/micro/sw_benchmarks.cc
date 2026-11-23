@@ -10,7 +10,25 @@
 #include "src/render/sw/sw_raster.hpp"
 #include "src/render/sw/sw_span_brush.hpp"
 
-static void BM_SWExamplePremulAlpha(benchmark::State& state) {
+#ifdef SKITY_SW_ACCEL
+#include "src/render/sw/accel/sw_accel.hpp"
+
+// Scopes one A/B arm of the accelerator runtime switch; the global state is
+// restored on exit so other benchmarks are unaffected.
+class AccelToggle {
+ public:
+  explicit AccelToggle(bool enabled)
+      : previous_(skity::sw_accel::IsEnabled()) {
+    skity::sw_accel::SetEnabled(enabled);
+  }
+  ~AccelToggle() { skity::sw_accel::SetEnabled(previous_); }
+
+ private:
+  bool previous_;
+};
+#endif
+
+static void RunExamplePremulScene(benchmark::State& state) {
   skity::Bitmap bitmap(1000, 800, skity::AlphaType::kPremul_AlphaType);
   auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
   skity::Paint paint;
@@ -20,7 +38,65 @@ static void BM_SWExamplePremulAlpha(benchmark::State& state) {
     skity::example::basic::draw_canvas(canvas.get());
   }
 }
+
+static void BM_SWExamplePremulAlpha(benchmark::State& state) {
+  RunExamplePremulScene(state);
+}
 BENCHMARK(BM_SWExamplePremulAlpha)->Unit(benchmark::kMicrosecond);
+
+#ifdef SKITY_SW_ACCEL
+// Same scene with the SIMD kernels disabled: the legacy scalar brush runs in
+// the same binary. Compare against BM_SWExamplePremulAlpha for the
+// accelerator's end-to-end effect (the scene still contains gradient and
+// text draws which never take the solid-fill fast path).
+static void BM_SWExamplePremulAlphaLegacy(benchmark::State& state) {
+  AccelToggle toggle(false);
+  RunExamplePremulScene(state);
+}
+BENCHMARK(BM_SWExamplePremulAlphaLegacy)->Unit(benchmark::kMicrosecond);
+#endif
+
+// Per-section breakdown of the example scene. Each section is drawn with the
+// same transform as in draw_canvas, on the same premul target, so the times
+// add up to the full scene and show where the software backend spends its
+// time (and which draws the solid-fill accelerator can and cannot reach).
+namespace {
+
+using SectionFn = void (*)(skity::Canvas*);
+
+template <SectionFn kSection, int32_t kTx, int32_t kTy>
+void RunExampleSection(benchmark::State& state) {
+  skity::Bitmap bitmap(1000, 800, skity::AlphaType::kPremul_AlphaType);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+  for (auto _ : state) {
+    canvas->Save();
+    canvas->Translate(static_cast<float>(kTx), static_cast<float>(kTy));
+    kSection(canvas.get());
+    canvas->Restore();
+  }
+}
+
+}  // namespace
+
+#define SKITY_BENCH_SECTION(name, fn, tx, ty)                             \
+  static void BM_SWSection_##name(benchmark::State& state) {              \
+    RunExampleSection<skity::example::basic::fn, tx, ty>(state);          \
+  }                                                                      \
+  BENCHMARK(BM_SWSection_##name)->Unit(benchmark::kMicrosecond);          \
+  static void BM_SWSection_##name##_Legacy(benchmark::State& state) {     \
+    AccelToggle toggle(false);                                             \
+    RunExampleSection<skity::example::basic::fn, tx, ty>(state);          \
+  }                                                                      \
+  BENCHMARK(BM_SWSection_##name##_Legacy)->Unit(benchmark::kMicrosecond);
+
+#ifdef SKITY_SW_ACCEL
+SKITY_BENCH_SECTION(BasicShapes, draw_basic_example, 0, 0)
+SKITY_BENCH_SECTION(PathEffect, draw_path_effect_example, 300, 0)
+SKITY_BENCH_SECTION(DashStroke, draw_dash_start_example, 0, 300)
+SKITY_BENCH_SECTION(Text, draw_simple_text, 520, 0)
+SKITY_BENCH_SECTION(Gradient, draw_linear_gradient_example, 400, 300)
+SKITY_BENCH_SECTION(EvenOddFill, draw_even_odd_fill, 800, 0)
+#endif
 
 static void BM_SWExampleUnpremulAlpha(benchmark::State& state) {
   skity::Bitmap bitmap(1000, 800, skity::AlphaType::kUnpremul_AlphaType);

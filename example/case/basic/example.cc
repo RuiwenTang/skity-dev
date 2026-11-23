@@ -10,7 +10,7 @@
 namespace skity::example::basic {
 
 // same as https://fiddle.skia.org/c/@shapes
-static void draw_basic_example(skity::Canvas* canvas) {
+void draw_basic_example(skity::Canvas* canvas) {
   skity::Paint paint;
   paint.SetStyle(skity::Paint::kFill_Style);
   paint.SetAntiAlias(true);
@@ -36,7 +36,7 @@ static void draw_basic_example(skity::Canvas* canvas) {
 }
 
 // same as https://fiddle.skia.org/c/@discrete_path
-static void draw_path_effect_example(skity::Canvas* canvas) {
+void draw_path_effect_example(skity::Canvas* canvas) {
   const float R = 115.2f, C = 128.f;
   skity::Path path;
   path.MoveTo(C + R, C);
@@ -54,7 +54,7 @@ static void draw_path_effect_example(skity::Canvas* canvas) {
   canvas->DrawPath(path, paint);
 }
 
-static void draw_dash_start_example(skity::Canvas* canvas) {
+void draw_dash_start_example(skity::Canvas* canvas) {
   skity::Path path;
   path.MoveTo(199, 34);
   path.LineTo(253, 143);
