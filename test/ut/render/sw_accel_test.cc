@@ -168,4 +168,29 @@ TEST(SWAccel, UnsupportedModeFallsBack) {
   EXPECT_EQ(0xffffffffu, bitmap[0]);
 }
 
+TEST(SWAccel, RuntimeSwitchTogglesFallback) {
+  std::vector<uint32_t> bitmap(kWidth, 0xffffffffu);
+  Span span{0, 0, 4, 255};
+
+  skity::sw_accel::SetEnabled(true);
+  EXPECT_TRUE(skity::sw_accel::IsEnabled());
+  EXPECT_TRUE(FillSolidSpans(BlendMode::kSrc, 0xff00ff00u,
+                             reinterpret_cast<uint8_t*>(bitmap.data()),
+                             kWidth * 4, kWidth, 1, &span, 1));
+
+  // Disabled at runtime: the entry point fails without touching pixels and
+  // SWCanvas falls back to the legacy brush.
+  skity::sw_accel::SetEnabled(false);
+  EXPECT_FALSE(skity::sw_accel::IsEnabled());
+  EXPECT_FALSE(FillSolidSpans(BlendMode::kSrc, 0xff00ff00u,
+                              reinterpret_cast<uint8_t*>(bitmap.data()),
+                              kWidth * 4, kWidth, 1, &span, 1));
+
+  // Restore for the other tests.
+  skity::sw_accel::SetEnabled(true);
+  EXPECT_TRUE(FillSolidSpans(BlendMode::kSrc, 0xff00ff00u,
+                             reinterpret_cast<uint8_t*>(bitmap.data()),
+                             kWidth * 4, kWidth, 1, &span, 1));
+}
+
 #endif  // SKITY_SW_ACCEL

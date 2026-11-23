@@ -10,6 +10,7 @@
 #define HWY_TARGET_INCLUDE "src/render/sw/accel/sw_accel_kernels.cc"
 #include <hwy/foreach_target.h>
 
+#include <atomic>
 #include <mutex>
 
 #include "src/graphic/color_priv.hpp"
@@ -71,6 +72,7 @@ uint32_t ReferenceBlend(BlendMode mode, uint32_t src_pm, uint32_t dst_mem,
 
 std::once_flag g_validate_once;
 bool g_available = false;
+std::atomic<bool> g_runtime_enabled{true};
 
 void ValidateOnce() {
   // Same deterministic pattern shape as the unit tests: rows longer than a
@@ -135,10 +137,16 @@ bool SupportsSolidMode(BlendMode mode) {
   }
 }
 
+void SetEnabled(bool enabled) {
+  g_runtime_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool IsEnabled() { return g_runtime_enabled.load(std::memory_order_relaxed); }
+
 bool FillSolidSpans(BlendMode mode, uint32_t src_pm, uint8_t* dst_base,
                     size_t row_bytes, int32_t width, int32_t height,
                     const Span* spans, size_t span_count) {
-  if (!Available()) {
+  if (!IsEnabled() || !Available()) {
     return false;
   }
   RunKernelFn kernel = SelectRunKernel(mode);

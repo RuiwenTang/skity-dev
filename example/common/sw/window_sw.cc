@@ -6,7 +6,12 @@
 
 #include <iostream>
 #include <skity/skity.hpp>
+#include <string>
 #include <vector>
+
+#ifdef SKITY_SW_ACCEL
+#include "src/render/sw/accel/sw_accel.hpp"
+#endif
 
 namespace skity {
 namespace example {
@@ -184,6 +189,29 @@ GLFWwindow* WindowSW::CreateWindowHandler() {
     return nullptr;
   }
   glfwMakeContextCurrent(window);
+
+#ifdef SKITY_SW_ACCEL
+  // Dev switch: press S to toggle the SIMD-accelerated SW path and compare
+  // rendering results / performance against the legacy brush live.
+  glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int, int action,
+                                int) {
+    if (action != GLFW_PRESS || key != GLFW_KEY_S) {
+      return;
+    }
+    const bool enabled = !skity::sw_accel::IsEnabled();
+    skity::sw_accel::SetEnabled(enabled);
+    std::string title = glfwGetWindowTitle(w);
+    for (const char* tag : {" | SW: accel", " | SW: legacy"}) {
+      const size_t pos = title.rfind(tag);
+      if (pos != std::string::npos) {
+        title.erase(pos);
+        break;
+      }
+    }
+    title += enabled ? " | SW: accel" : " | SW: legacy";
+    glfwSetWindowTitle(w, title.c_str());
+  });
+#endif
 
   load_gl_function();
 

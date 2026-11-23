@@ -20,6 +20,11 @@ if (${SKITY_SW_RENDERER})
     ${CMAKE_CURRENT_LIST_DIR}/sw/window_sw.hpp
   )
 
+  # window_sw.cc reaches the accelerator runtime switch through internal
+  # headers (src/...); the source root is not part of skity's public
+  # interface includes.
+  target_include_directories(skity_example_common PRIVATE ${CMAKE_SOURCE_DIR})
+
 endif()
 
 if (${SKITY_GL_BACKEND})
