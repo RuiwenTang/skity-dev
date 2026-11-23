@@ -4,6 +4,12 @@
 
 // Kernel body for the SW accelerator. Re-included once per SIMD target by
 // sw_accel.cpp through hwy/foreach_target.h; must not be compiled directly.
+//
+// Width-generic: ScalableTag (the target's native width) everywhere, so the
+// same source instantiates at 128-bit on NEON/SSE and 256/512-bit on
+// AVX2/AVX-512. The LowerHalf/UpperHalf pairs and the Combine in each loop
+// are expressed against the full-width tags and adapt automatically; shuffle
+// control is built arithmetically from Iota instead of 16-byte tables.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -53,10 +59,11 @@ static inline V RoundMul(V a, V b) {
   return hn::ShiftRight<8>(hn::Add(t, hn::ShiftRight<8>(t)));
 }
 
-// Expands the constant src color into 16 bytes (four identical kRGBA
-// pixels) for the vector loops.
-static inline void FillSrcBytes(uint8_t* src_bytes, uint32_t src_pm) {
-  for (int px = 0; px < 4; px++) {
+// Expands the constant src color into one group (Lanes(d8) / 4 identical
+// kRGBA pixels) for the vector loops.
+static inline void FillSrcBytes(uint8_t* src_bytes, uint32_t src_pm,
+                                size_t pixels) {
+  for (size_t px = 0; px < pixels; px++) {
     src_bytes[px * 4 + 0] = static_cast<uint8_t>(src_pm >> 16);  // R
     src_bytes[px * 4 + 1] = static_cast<uint8_t>(src_pm >> 8);   // G
     src_bytes[px * 4 + 2] = static_cast<uint8_t>(src_pm);        // B
@@ -64,14 +71,17 @@ static inline void FillSrcBytes(uint8_t* src_bytes, uint32_t src_pm) {
   }
 }
 
-// TableLookupBytes mask replicating each pixel's alpha byte (kRGBA byte 3 of
-// every pixel) into the pixel's four byte lanes, so a per-pixel dst-alpha
-// scale can be built after PromoteTo.
+// Replicates the byte at offset `lane_byte` of every 4-byte pixel into the
+// pixel's four byte lanes, so a per-pixel scale can be built after
+// PromoteTo. The shuffle control is arithmetic ((i & ~3) + lane_byte), which
+// stays correct at any vector width because pixels never cross 128-bit
+// lanes. Used for alpha (byte 3) and for the gradient LUT fraction (byte 0).
 template <class D8, class V8>
-static inline V8 BroadcastAlpha(D8 d8, V8 px) {
-  alignas(16) static constexpr uint8_t kAlphaLanes[16] = {
-      3, 3, 3, 3, 7, 7, 7, 7, 11, 11, 11, 11, 15, 15, 15, 15};
-  return hn::TableLookupBytes(px, hn::LoadU(d8, kAlphaLanes));
+static inline V8 BroadcastLaneByte(D8 d8, V8 px, uint8_t lane_byte) {
+  const auto idx =
+      hn::Add(hn::And(hn::Iota(d8, 0), hn::Set(d8, uint8_t{0xFC})),
+              hn::Set(d8, lane_byte));
+  return hn::TableLookupBytes(px, idx);
 }
 
 void SolidRunClearKernel(uint8_t* HWY_RESTRICT dst, size_t count,
@@ -83,7 +93,7 @@ void SolidRunClearKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 void SolidRunSrcKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                        uint32_t src_pm) {
   const uint32_t src_mem = PMColorSwapRB(src_pm);
-  const hn::CappedTag<uint32_t, 4> d32;
+  const hn::ScalableTag<uint32_t> d32;
   const size_t vl = hn::Lanes(d32);
   const auto v = hn::Set(d32, src_mem);
   uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst);
@@ -148,14 +158,16 @@ static void SolidRunCoeffKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                               DST == ScaleKind::kInvDstA ||
                               DST == ScaleKind::kDstA;
 
-  uint8_t src_bytes[16];
-  FillSrcBytes(src_bytes, src_pm);
+  alignas(64) uint8_t src_bytes[64];
 
-  const hn::CappedTag<uint8_t, 16> d8;
+  const hn::ScalableTag<uint8_t> d8;
   const hn::Half<decltype(d8)> d8h;
-  const hn::CappedTag<uint16_t, 8> d16;
-  const size_t vl = hn::Lanes(d8);  // 16 bytes = 4 pixels
+  // Same total bytes as the u8 halves: Rebind keeps lane counts, so the u16
+  // tag shares its lane count with d8h.
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
+  const size_t vl = hn::Lanes(d8);  // bytes; one group is vl / 4 pixels
 
+  FillSrcBytes(src_bytes, src_pm, vl / 4);
   const auto src8 = hn::LoadU(d8, src_bytes);
   const auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, src8));
   const auto s_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, src8));
@@ -173,7 +185,7 @@ static void SolidRunCoeffKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                      ScaleMul(dst16, TermScale<DST>(d16, da16, sa)));
     };
     if constexpr (kNeedsDstA) {
-      const auto a8 = BroadcastAlpha(d8, d8v);
+      const auto a8 = BroadcastLaneByte(d8, d8v, 3);
       const auto a_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, a8));
       const auto a_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, a8));
       const auto r_lo = term_add(s_lo, d_lo, a_lo);
@@ -262,13 +274,14 @@ void SolidRunXorKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 // kPlus: r = min(s + d, 255) per channel (saturating add).
 void SolidRunPlusKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                         uint32_t src_pm) {
-  uint8_t src_bytes[16];
-  FillSrcBytes(src_bytes, src_pm);
+  alignas(64) uint8_t src_bytes[64];
 
-  const hn::CappedTag<uint8_t, 16> d8;
+  const hn::ScalableTag<uint8_t> d8;
   const hn::Half<decltype(d8)> d8h;
-  const hn::CappedTag<uint16_t, 8> d16;
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
   const size_t vl = hn::Lanes(d8);
+
+  FillSrcBytes(src_bytes, src_pm, vl / 4);
 
   const auto src8 = hn::LoadU(d8, src_bytes);
   const auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, src8));
@@ -298,13 +311,14 @@ void SolidRunPlusKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 // kModulate: r = s * d per channel (MulDiv255Round rounding product).
 void SolidRunModulateKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                             uint32_t src_pm) {
-  uint8_t src_bytes[16];
-  FillSrcBytes(src_bytes, src_pm);
+  alignas(64) uint8_t src_bytes[64];
 
-  const hn::CappedTag<uint8_t, 16> d8;
+  const hn::ScalableTag<uint8_t> d8;
   const hn::Half<decltype(d8)> d8h;
-  const hn::CappedTag<uint16_t, 8> d16;
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
   const size_t vl = hn::Lanes(d8);
+
+  FillSrcBytes(src_bytes, src_pm, vl / 4);
 
   const auto src8 = hn::LoadU(d8, src_bytes);
   const auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, src8));
@@ -331,13 +345,14 @@ void SolidRunModulateKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 // kScreen: r = s + d - s * d per channel (rounding product, like PMColorMul).
 void SolidRunScreenKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                           uint32_t src_pm) {
-  uint8_t src_bytes[16];
-  FillSrcBytes(src_bytes, src_pm);
+  alignas(64) uint8_t src_bytes[64];
 
-  const hn::CappedTag<uint8_t, 16> d8;
+  const hn::ScalableTag<uint8_t> d8;
   const hn::Half<decltype(d8)> d8h;
-  const hn::CappedTag<uint16_t, 8> d16;
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
   const size_t vl = hn::Lanes(d8);
+
+  FillSrcBytes(src_bytes, src_pm, vl / 4);
 
   const auto src8 = hn::LoadU(d8, src_bytes);
   const auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, src8));
@@ -381,13 +396,17 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
                                size_t count, uint32_t cover) {
   const GradientParams& p = *gp;
 
-  const hn::CappedTag<float, 4> f32;
-  const hn::CappedTag<int32_t, 4> i32;
-  const hn::CappedTag<uint32_t, 4> u32;
-  const hn::CappedTag<uint8_t, 16> d8;
+  // Width-generic tags: d8 spans the native width (one group is Lanes(d8) / 4
+  // pixels); f32/i32/u32 carry one lane per pixel (same bytes as d8, a
+  // quarter of the u8 lanes - Rebind keeps lane counts, hence two Halves).
+  const hn::ScalableTag<uint8_t> d8;
   const hn::Half<decltype(d8)> d8h;
-  const hn::CappedTag<uint16_t, 8> d16;
-  const hn::CappedTag<int16_t, 8> di16;
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
+  const hn::Rebind<int16_t, decltype(d16)> di16;
+  const hn::Half<hn::Half<hn::Rebind<float, decltype(d8)>>> f32;
+  const hn::Half<hn::Half<hn::Rebind<int32_t, decltype(d8)>>> i32;
+  const hn::Half<hn::Half<hn::Rebind<uint32_t, decltype(d8)>>> u32;
+  const size_t vl = hn::Lanes(d8);  // bytes; one group is vl / 4 pixels
 
   // MapPoint terms, in the scalar expression order
   // src.x * m00 + src.y * m01 + m02 (left-associative).
@@ -421,13 +440,10 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
   const auto k255u = hn::Set(u32, 255u);
   const auto kRound128 = hn::Set(d16, uint16_t{128});
   const auto cover16 = hn::Set(d16, static_cast<uint16_t>(cover));
-  // Broadcasts each pixel's frac byte (low byte of the u32 frac) to the
-  // pixel's four byte lanes, like BroadcastAlpha but from byte 0.
-  alignas(16) static constexpr uint8_t kFracLanes[16] = {
-      0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12};
 
+  const size_t group = vl / 4;  // pixels per iteration
   size_t px = 0;
-  for (; px < count; px += 4) {
+  for (; px < count; px += group) {
     // ---- t -----------------------------------------------------------
     const auto fx = hn::Add(
         hn::ConvertTo(f32,
@@ -467,20 +483,19 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
     const auto frac8 = hn::Min(
         hn::ConvertTo(u32, hn::Add(hn::Mul(frac_f, k256f), kHalf)),
         k255u);
-    alignas(16) uint32_t i0a[4];
+    alignas(64) uint32_t i0a[16];
     hn::Store(i0, u32, i0a);
 
-    alignas(16) uint32_t c0a[4];
-    alignas(16) uint32_t c1a[4];
-    for (int j = 0; j < 4; j++) {
+    alignas(64) uint32_t c0a[16];
+    alignas(64) uint32_t c1a[16];
+    for (size_t j = 0; j < vl / 4; j++) {
       const uint32_t k = i0a[j];
       c0a[j] = p.lut[k];
       c1a[j] = p.lut[k + 1 == static_cast<uint32_t>(p.lut_entries) ? k : k + 1];
     }
     const auto c0_8 = hn::BitCast(d8, hn::Load(u32, c0a));
     const auto c1_8 = hn::BitCast(d8, hn::Load(u32, c1a));
-    const auto frac8b = hn::TableLookupBytes(hn::BitCast(d8, frac8),
-                                             hn::LoadU(d8, kFracLanes));
+    const auto frac8b = BroadcastLaneByte(d8, hn::BitCast(d8, frac8), 0);
     const auto c16lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, c0_8));
     const auto c16hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, c0_8));
     // Signed per-channel deltas (two's complement in the u16 lanes): the
@@ -516,7 +531,7 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
     const size_t rem = count - px;
     if constexpr (!kBlendSrcOver) {
       // kSrc: store the fetched words as-is.
-      if (rem >= 4) {
+      if (rem >= group) {
         hn::StoreU(word, u32, reinterpret_cast<uint32_t*>(dst + px * 4));
       } else {
         hn::BlendedStore(word, hn::FirstN(u32, rem), u32,
@@ -524,10 +539,10 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
       }
     } else {
       // ---- variable-src SrcOver: d + (d * (256 - sa)) >> 8 -------------
-      alignas(16) uint32_t words[4];
+      alignas(64) uint32_t words[16];
       hn::Store(word, u32, words);
       const auto s8 = hn::LoadU(d8, reinterpret_cast<const uint8_t*>(words));
-      const auto sa8 = BroadcastAlpha(d8, s8);
+      const auto sa8 = BroadcastLaneByte(d8, s8, 3);
       const auto d8v = hn::LoadU(d8, dst + px * 4);
       const auto k256 = hn::Set(d16, uint16_t{256});
       const auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, s8));
@@ -544,7 +559,7 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
           hn::Add(s_hi, hn::ShiftRight<8>(hn::Mul(d_hi, scale_hi)));
       const auto out8 = hn::Combine(d8, hn::TruncateTo(d8h, r_hi),
                                     hn::TruncateTo(d8h, r_lo));
-      if (rem >= 4) {
+      if (rem >= group) {
         hn::StoreU(out8, d8, dst + px * 4);
       } else {
         hn::BlendedStore(out8, hn::FirstN(d8, rem * 4), d8, dst + px * 4);
