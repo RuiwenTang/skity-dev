@@ -52,9 +52,10 @@ SW_ACCEL_API bool IsEnabled();
 // little-endian u32 0xAABBGGRR); src_pm is a PMColor word (0xAARRGGBB).
 // Spans are clamped to [0, width) x [0, height) like SWSpanBrush::Brush.
 //
-// Supported modes today: kClear, kSrc, kSrcOver. Returns false (and does
-// nothing) when the mode is unsupported or the accelerator is unavailable,
-// in which case the caller must use the legacy brush path.
+// Supported modes today: every Porter-Duff coeff mode (kClear through
+// kScreen, including the kDst no-op). Returns false (and does nothing) when
+// the mode is unsupported or the accelerator is unavailable, in which case
+// the caller must use the legacy brush path.
 bool FillSolidSpans(BlendMode mode, uint32_t src_pm, uint8_t* dst_base,
                     size_t row_bytes, int32_t width, int32_t height,
                     const Span* spans, size_t span_count);

@@ -10,6 +10,7 @@
 
 #include <vector>
 
+#include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
 #include "src/render/sw/accel/sw_accel.hpp"
 
@@ -35,32 +36,14 @@ uint32_t RandomColor(uint32_t& state) {
 }
 
 // Scalar mirror of the legacy SolidColorBrush path: fold coverage into src,
-// then PorterDuffBlend. Takes and returns memory words (0xAABBGGRR,
-// ColorType::kRGBA layout) like the kernels do.
+// then the real PorterDuffBlend (the exact function the legacy brush calls).
+// Takes and returns memory words (0xAABBGGRR, ColorType::kRGBA layout) like
+// the kernels do.
 uint32_t ReferenceBlend(BlendMode mode, uint32_t src_pm, uint32_t dst_mem,
                         uint8_t cover) {
-  uint32_t dst = skity::PMColorSwapRB(dst_mem);
-  uint32_t src = cover == 255 ? src_pm : skity::AlphaMulQ(src_pm, cover);
-  uint32_t result;
-  switch (mode) {
-    case BlendMode::kClear:
-      result = 0;
-      break;
-    case BlendMode::kSrc:
-      result = src;
-      break;
-    case BlendMode::kSrcOver:
-      if (ColorGetA(src) == 0) {
-        result = dst;
-      } else {
-        result = skity::PMSrcOver(src, dst);
-      }
-      break;
-    default:
-      result = dst;
-      break;
-  }
-  return skity::PMColorSwapRB(result);
+  const uint32_t src = cover == 255 ? src_pm : skity::AlphaMulQ(src_pm, cover);
+  return skity::PMColorSwapRB(
+      skity::PorterDuffBlend(src, skity::PMColorSwapRB(dst_mem), mode));
 }
 
 constexpr int32_t kWidth = 64;
@@ -115,8 +98,11 @@ TEST(SWAccel, ValidatePasses) {
 
 TEST(SWAccel, SolidSpansMatchScalarReference) {
   uint32_t state = 0x9e3779b9u;
-  const BlendMode modes[] = {BlendMode::kClear, BlendMode::kSrc,
-                             BlendMode::kSrcOver};
+  // Every Porter-Duff coeff mode, kClear through kScreen.
+  std::vector<BlendMode> modes;
+  for (int m = 0; m <= static_cast<int>(BlendMode::kLastCoeffMode); m++) {
+    modes.push_back(static_cast<BlendMode>(m));
+  }
   const uint32_t edge_colors[] = {0x00000000u, 0xffffffffu, 0x80404040u};
 
   for (int round = 0; round < 20; round++) {
@@ -158,10 +144,11 @@ TEST(SWAccel, SolidSpansClampOutOfBounds) {
 }
 
 TEST(SWAccel, UnsupportedModeFallsBack) {
-  EXPECT_FALSE(skity::sw_accel::SupportsSolidMode(BlendMode::kDstOver));
+  // Advanced (non-coeff) modes are not in the kernel table yet.
+  EXPECT_FALSE(skity::sw_accel::SupportsSolidMode(BlendMode::kOverlay));
   std::vector<uint32_t> bitmap(kWidth, 0xffffffffu);
   Span span{0, 0, 4, 255};
-  EXPECT_FALSE(FillSolidSpans(BlendMode::kDstOver, 0xff000000u,
+  EXPECT_FALSE(FillSolidSpans(BlendMode::kOverlay, 0xff000000u,
                               reinterpret_cast<uint8_t*>(bitmap.data()),
                               kWidth * 4, kWidth, 1, &span, 1));
   // Nothing was written.

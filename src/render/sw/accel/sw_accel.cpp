@@ -13,6 +13,7 @@
 #include <atomic>
 #include <mutex>
 
+#include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
 #include "src/render/sw/accel/sw_accel.hpp"
 #include "src/render/sw/accel/sw_accel_kernels.cc"
@@ -22,7 +23,19 @@ namespace sw_accel {
 
 HWY_EXPORT(SolidRunClearKernel);
 HWY_EXPORT(SolidRunSrcKernel);
+HWY_EXPORT(SolidRunDstKernel);
 HWY_EXPORT(SolidRunSrcOverKernel);
+HWY_EXPORT(SolidRunDstOverKernel);
+HWY_EXPORT(SolidRunSrcInKernel);
+HWY_EXPORT(SolidRunDstInKernel);
+HWY_EXPORT(SolidRunSrcOutKernel);
+HWY_EXPORT(SolidRunDstOutKernel);
+HWY_EXPORT(SolidRunSrcATopKernel);
+HWY_EXPORT(SolidRunDstATopKernel);
+HWY_EXPORT(SolidRunXorKernel);
+HWY_EXPORT(SolidRunPlusKernel);
+HWY_EXPORT(SolidRunModulateKernel);
+HWY_EXPORT(SolidRunScreenKernel);
 
 namespace {
 
@@ -34,40 +47,44 @@ RunKernelFn SelectRunKernel(BlendMode mode) {
       return HWY_DYNAMIC_DISPATCH(SolidRunClearKernel);
     case BlendMode::kSrc:
       return HWY_DYNAMIC_DISPATCH(SolidRunSrcKernel);
+    case BlendMode::kDst:
+      return HWY_DYNAMIC_DISPATCH(SolidRunDstKernel);
     case BlendMode::kSrcOver:
       return HWY_DYNAMIC_DISPATCH(SolidRunSrcOverKernel);
+    case BlendMode::kDstOver:
+      return HWY_DYNAMIC_DISPATCH(SolidRunDstOverKernel);
+    case BlendMode::kSrcIn:
+      return HWY_DYNAMIC_DISPATCH(SolidRunSrcInKernel);
+    case BlendMode::kDstIn:
+      return HWY_DYNAMIC_DISPATCH(SolidRunDstInKernel);
+    case BlendMode::kSrcOut:
+      return HWY_DYNAMIC_DISPATCH(SolidRunSrcOutKernel);
+    case BlendMode::kDstOut:
+      return HWY_DYNAMIC_DISPATCH(SolidRunDstOutKernel);
+    case BlendMode::kSrcATop:
+      return HWY_DYNAMIC_DISPATCH(SolidRunSrcATopKernel);
+    case BlendMode::kDstATop:
+      return HWY_DYNAMIC_DISPATCH(SolidRunDstATopKernel);
+    case BlendMode::kXor:
+      return HWY_DYNAMIC_DISPATCH(SolidRunXorKernel);
+    case BlendMode::kPlus:
+      return HWY_DYNAMIC_DISPATCH(SolidRunPlusKernel);
+    case BlendMode::kModulate:
+      return HWY_DYNAMIC_DISPATCH(SolidRunModulateKernel);
+    case BlendMode::kScreen:
+      return HWY_DYNAMIC_DISPATCH(SolidRunScreenKernel);
     default:
       return nullptr;
   }
 }
 
 // Scalar reference of the legacy solid path: fold coverage into src, then
-// blend. Takes and returns memory words (0xAABBGGRR, ColorType::kRGBA);
-// used by Validate() to check the dispatched kernels.
+// the real PorterDuffBlend. Takes and returns memory words (0xAABBGGRR,
+// ColorType::kRGBA); used by Validate() to check the dispatched kernels.
 uint32_t ReferenceBlend(BlendMode mode, uint32_t src_pm, uint32_t dst_mem,
                         uint8_t cover) {
-  uint32_t dst = PMColorSwapRB(dst_mem);
-  uint32_t src = cover == 255 ? src_pm : AlphaMulQ(src_pm, cover);
-  uint32_t result;
-  switch (mode) {
-    case BlendMode::kClear:
-      result = Color_TRANSPARENT;
-      break;
-    case BlendMode::kSrc:
-      result = src;
-      break;
-    case BlendMode::kSrcOver:
-      if (ColorGetA(src) == 0) {
-        result = dst;
-      } else {
-        result = PMSrcOver(src, dst);
-      }
-      break;
-    default:
-      result = dst;
-      break;
-  }
-  return PMColorSwapRB(result);
+  const uint32_t src = cover == 255 ? src_pm : AlphaMulQ(src_pm, cover);
+  return PMColorSwapRB(PorterDuffBlend(src, PMColorSwapRB(dst_mem), mode));
 }
 
 std::once_flag g_validate_once;
@@ -78,35 +95,52 @@ void ValidateOnce() {
   // Same deterministic pattern shape as the unit tests: rows longer than a
   // vector plus tail, and alpha edges (0, 128, 255). Dispatches the kernels
   // directly - going through FillSolidSpans would re-enter this call_once.
-  const RunKernelFn src_over = HWY_DYNAMIC_DISPATCH(SolidRunSrcOverKernel);
-  const RunKernelFn src = HWY_DYNAMIC_DISPATCH(SolidRunSrcKernel);
+  struct Entry {
+    BlendMode mode;
+    RunKernelFn kernel;
+  };
+  const Entry entries[] = {
+      {BlendMode::kClear, HWY_DYNAMIC_DISPATCH(SolidRunClearKernel)},
+      {BlendMode::kSrc, HWY_DYNAMIC_DISPATCH(SolidRunSrcKernel)},
+      {BlendMode::kDst, HWY_DYNAMIC_DISPATCH(SolidRunDstKernel)},
+      {BlendMode::kSrcOver, HWY_DYNAMIC_DISPATCH(SolidRunSrcOverKernel)},
+      {BlendMode::kDstOver, HWY_DYNAMIC_DISPATCH(SolidRunDstOverKernel)},
+      {BlendMode::kSrcIn, HWY_DYNAMIC_DISPATCH(SolidRunSrcInKernel)},
+      {BlendMode::kDstIn, HWY_DYNAMIC_DISPATCH(SolidRunDstInKernel)},
+      {BlendMode::kSrcOut, HWY_DYNAMIC_DISPATCH(SolidRunSrcOutKernel)},
+      {BlendMode::kDstOut, HWY_DYNAMIC_DISPATCH(SolidRunDstOutKernel)},
+      {BlendMode::kSrcATop, HWY_DYNAMIC_DISPATCH(SolidRunSrcATopKernel)},
+      {BlendMode::kDstATop, HWY_DYNAMIC_DISPATCH(SolidRunDstATopKernel)},
+      {BlendMode::kXor, HWY_DYNAMIC_DISPATCH(SolidRunXorKernel)},
+      {BlendMode::kPlus, HWY_DYNAMIC_DISPATCH(SolidRunPlusKernel)},
+      {BlendMode::kModulate, HWY_DYNAMIC_DISPATCH(SolidRunModulateKernel)},
+      {BlendMode::kScreen, HWY_DYNAMIC_DISPATCH(SolidRunScreenKernel)},
+  };
+  // Premul src colors (channel values bounded by alpha): the mixed
+  // Porter-Duff sums are byte-safe only on premul operands, which is the
+  // accelerator's guaranteed input domain.
   const uint32_t srcs[] = {0x00000000u, 0x80808080u, 0xffffffffu, 0xff204060u,
                            0x40302010u};
+  // Arbitrary words folded to premul for the same reason.
   uint32_t dst[71];
   uint32_t out[71];
   for (size_t i = 0; i < 71; i++) {
-    dst[i] = static_cast<uint32_t>(i * 2654435761u);
+    dst[i] = ColorToPMColor(static_cast<uint32_t>(i * 2654435761u));
     out[i] = dst[i];
   }
-  for (uint32_t src_pm : srcs) {
-    for (int cover_int = 0; cover_int < 256; cover_int += 5) {
-      const uint8_t cover = static_cast<uint8_t>(cover_int);
-      const uint32_t scaled =
-          cover == 255 ? src_pm : AlphaMulQ(src_pm, cover);
-      src(reinterpret_cast<uint8_t*>(out), 71, scaled);
-      if (out[0] != ReferenceBlend(BlendMode::kSrc, src_pm, dst[0], cover)) {
-        return;
-      }
-      for (size_t i = 0; i < 71; i++) {
-        out[i] = dst[i];
-      }
-      src_over(reinterpret_cast<uint8_t*>(out), 71, scaled);
-      for (size_t i = 0; i < 71; i++) {
-        if (out[i] != ReferenceBlend(BlendMode::kSrcOver, src_pm, dst[i],
-                                     cover)) {
-          return;
+  for (const Entry& e : entries) {
+    for (uint32_t src_pm : srcs) {
+      for (int cover_int = 0; cover_int < 256; cover_int += 5) {
+        const uint8_t cover = static_cast<uint8_t>(cover_int);
+        const uint32_t scaled =
+            cover == 255 ? src_pm : AlphaMulQ(src_pm, cover);
+        e.kernel(reinterpret_cast<uint8_t*>(out), 71, scaled);
+        for (size_t i = 0; i < 71; i++) {
+          if (out[i] != ReferenceBlend(e.mode, src_pm, dst[i], cover)) {
+            return;
+          }
+          out[i] = dst[i];
         }
-        out[i] = dst[i];
       }
     }
   }
@@ -127,14 +161,7 @@ bool Available() {
 }
 
 bool SupportsSolidMode(BlendMode mode) {
-  switch (mode) {
-    case BlendMode::kClear:
-    case BlendMode::kSrc:
-    case BlendMode::kSrcOver:
-      return true;
-    default:
-      return false;
-  }
+  return mode <= BlendMode::kLastCoeffMode;
 }
 
 void SetEnabled(bool enabled) {
