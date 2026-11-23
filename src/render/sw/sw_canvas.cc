@@ -15,6 +15,9 @@
 #include <skity/text/text_blob.hpp>
 #include <skity/text/text_run.hpp>
 
+#ifdef SKITY_SW_ACCEL
+#include "src/render/sw/accel/sw_accel.hpp"
+#endif
 #include "src/effect/image_filter_base.hpp"
 #include "src/effect/mask_filter_priv.hpp"
 #include "src/effect/pixmap_shader.hpp"
@@ -41,6 +44,31 @@ constexpr ColorType ToColorType(BitmapFormat bitmap_format) {
   }
 }
 }  // namespace
+
+#ifdef SKITY_SW_ACCEL
+// Fast path: constant-color fills (no shader / color filter) on premul
+// RGBA8888 targets go straight to the SIMD kernels; falls back to the
+// legacy brush when anything is unsupported.
+static bool TryAccelerateSolidFill(std::vector<Span> const& spans,
+                                   const Paint& paint, bool stroke,
+                                   Bitmap* bitmap) {
+  if (spans.empty() || paint.GetShader() || paint.GetColorFilter() ||
+      !sw_accel::SupportsSolidMode(paint.GetBlendMode()) ||
+      bitmap->GetAlphaType() != AlphaType::kPremul_AlphaType ||
+      bitmap->GetColorType() != ColorType::kRGBA) {
+    return false;
+  }
+  // Resolve the fill/stroke color exactly like GenerateBrush's solid branch.
+  const auto& bitmap_space = bitmap->GetPixmap()->GetColorSpace();
+  Color4f color = stroke ? paint.GetStrokeColor(bitmap_space)
+                         : paint.GetFillColor(bitmap_space);
+  uint32_t src_pm = ColorToPMColor(Color4fToColor(color));
+  return sw_accel::FillSolidSpans(
+      paint.GetBlendMode(), src_pm, bitmap->GetPixelAddr(),
+      bitmap->RowBytes(), static_cast<int32_t>(bitmap->Width()),
+      static_cast<int32_t>(bitmap->Height()), spans.data(), spans.size());
+}
+#endif
 
 static std::vector<Span> find_span_y(std::vector<Span> const& spans,
                                      int32_t y) {
@@ -331,19 +359,26 @@ void SWCanvas::DoBrush(const SWRaster& raster, const Paint& paint,
                        bool stroke) {
   SKITY_TRACE_EVENT(SWCanvas_DoBrush);
 
-  std::unique_ptr<SWSpanBrush> brush;
+  std::vector<Span> clip_spans;
+  std::vector<Span> const* spans = nullptr;
   if (state_stack_.back().HasClip()) {
-    auto clip_spans = state_stack_.back().PerformClip(raster.CurrentSpans());
+    clip_spans = state_stack_.back().PerformClip(raster.CurrentSpans());
     if (clip_spans.empty()) {
       return;
     }
-    brush = GenerateBrush(clip_spans, paint, stroke, raster.GetBounds());
-    brush->Brush();
+    spans = &clip_spans;
   } else {
-    brush =
-        GenerateBrush(raster.CurrentSpans(), paint, stroke, raster.GetBounds());
-    brush->Brush();
+    spans = &raster.CurrentSpans();
   }
+
+#ifdef SKITY_SW_ACCEL
+  if (TryAccelerateSolidFill(*spans, paint, stroke, bitmap_)) {
+    return;
+  }
+#endif
+
+  auto brush = GenerateBrush(*spans, paint, stroke, raster.GetBounds());
+  brush->Brush();
 }
 
 void SWCanvas::OnDrawPath(const Path& path, const Paint& paint) {
@@ -421,10 +456,20 @@ void SWCanvas::OnDrawPaint(const Paint& paint) {
   std::unique_ptr<SWSpanBrush> brush;
   // no clip
   if (state_stack_.empty() || !state_stack_.back().HasClip()) {
+#ifdef SKITY_SW_ACCEL
+    if (TryAccelerateSolidFill(raster.CurrentSpans(), paint, false, bitmap_)) {
+      return;
+    }
+#endif
     brush = GenerateBrush(raster.CurrentSpans(), paint, false, bounds);
     brush->Brush();
   } else {
     auto spans = state_stack_.back().PerformClip(raster.CurrentSpans());
+#ifdef SKITY_SW_ACCEL
+    if (TryAccelerateSolidFill(spans, paint, false, bitmap_)) {
+      return;
+    }
+#endif
     brush = GenerateBrush(spans, paint, false, bounds);
     brush->Brush();
   }

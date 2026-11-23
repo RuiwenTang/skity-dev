@@ -199,6 +199,7 @@ if(${SKITY_SW_ACCEL})
     target_include_directories(skity_sw_accel
       PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/highway
     )
     set_target_properties(skity_sw_accel PROPERTIES
