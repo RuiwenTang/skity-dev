@@ -151,6 +151,27 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   接受:M1b kernel 直接吃行缓冲后该路径整体消失；
 - 顺带修复 legacy bug:blit_two_alphas 累计分支把第二像素写到 (x, y+1)。
 
+**M1b 实测记录(2026-11,arm64,coeff 模式于 commit b13fa150 补全)**:
+- 内核形态:15 个 coeff 模式(kClear..kScreen,含 kDst no-op)全部位精确对齐
+  `PorterDuffBlend`。11 个双项模式共享单引擎
+  `result = (s*src_scale)>>8 + (d*dst_scale)>>8`(AlphaMulQ 截断语义),
+  scale 常量(来自 sa)或 per-pixel(dst alpha 经 TableLookupBytes 广播);
+  Plus=饱和加、Modulate/Screen=MulDiv255Round 精确 u16 复刻
+  (`t=p+128;(t+(t>>8))>>8`,p≤65025 全程 u16 内精确);标量尾巴直接调真实
+  `PorterDuffBlend`,测试参考亦然——参考与实现不再是两份手抄公式;
+- **关键代数结论**:PorterDuffBlend 里 sa/da 为 0/255 的全部快捷分支是统一
+  scale 公式的精确特例(`(c*256)>>8==c`,`(c*1)>>8==0`),向量码无需复现分支;
+- **premul 是混合求和型模式(SrcATop/Xor 等)的字节安全前提**(per-channel ≤255
+  仅对 premul 成立),这是加速器的保证输入域;Validate/测试的 dst 一律折成 premul;
+- Release A/B(交替 3×3):SrcOver 场景新旧持平(旧 1631/1669/1677μs,
+  新 1694/1668/1675μs,重叠噪声带)——模板引擎化对热路径零代价;
+- 教训(测量):**绝不能在 Debug/-O0 构建下做 SIMD A/B**——Highway 内联算子
+  全部被 outline 成真实函数调用(反汇编可见循环体内 bl 到 `operator*`/
+  `PromoteTo`),同一份代码在 -O0 下呈现 47% 伪回退;A/B 前先确认
+  CMAKE_BUILD_TYPE。教训(kRGBA):skity 的 ColorType::kRGBA 内存字节序是
+  [R,G,B,A](小端 u32 = 0xAABBGGRR),内核边界统一 PMColorSwapRB 一次进出;
+  legacy NEON 路径的 PMColorSwapRB 往返正是同一原因。
+
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
 - 合成端(逐像素标量→AVX2 批处理):微基准 8-16×;
