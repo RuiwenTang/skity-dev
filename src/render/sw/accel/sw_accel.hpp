@@ -12,9 +12,11 @@
 
 #include "src/render/sw/sw_subpixel.hpp"
 
-// Entry points stay hidden in unified C-ABI-only builds; otherwise they are
-// exported so dev tooling (examples) can use the runtime switch while the
-// Highway namespace itself remains hidden.
+// Only the runtime switch is exported from the shared library (dev tooling
+// such as the examples calls it); every other entry point is used inside
+// the library or by targets that link skity_sw_accel statically, and stays
+// hidden together with the Highway namespace. Unified C-ABI-only builds
+// export nothing here either.
 #if !defined(SKITY_HIDE_CXX_API) && defined(__GNUC__)
 #define SW_ACCEL_API __attribute__((visibility("default")))
 #else
@@ -28,7 +30,7 @@ namespace sw_accel {
 // renderer before the kernels are used (a failed check must disable the
 // accelerator and fall back to the scalar path), and by unit tests. Returns
 // false on mismatch.
-SW_ACCEL_API bool Validate();
+bool Validate();
 
 // Returns true once Validate() has passed; the first call runs the check
 // (std::call_once). All accelerator entry points are no-ops / return false
@@ -53,13 +55,12 @@ SW_ACCEL_API bool IsEnabled();
 // Supported modes today: kClear, kSrc, kSrcOver. Returns false (and does
 // nothing) when the mode is unsupported or the accelerator is unavailable,
 // in which case the caller must use the legacy brush path.
-SW_ACCEL_API bool FillSolidSpans(BlendMode mode, uint32_t src_pm,
-                                 uint8_t* dst_base, size_t row_bytes,
-                                 int32_t width, int32_t height,
-                                 const Span* spans, size_t span_count);
+bool FillSolidSpans(BlendMode mode, uint32_t src_pm, uint8_t* dst_base,
+                    size_t row_bytes, int32_t width, int32_t height,
+                    const Span* spans, size_t span_count);
 
 // Returns true when FillSolidSpans supports the blend mode.
-SW_ACCEL_API bool SupportsSolidMode(BlendMode mode);
+bool SupportsSolidMode(BlendMode mode);
 
 }  // namespace sw_accel
 }  // namespace skity
