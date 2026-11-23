@@ -171,9 +171,37 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   CMAKE_BUILD_TYPE。教训(kRGBA):skity 的 ColorType::kRGBA 内存字节序是
   [R,G,B,A](小端 u32 = 0xAABBGGRR),内核边界统一 PMColorSwapRB 一次进出;
   legacy NEON 路径的 PMColorSwapRB 往返正是同一原因。
+- **加速器 on/off 分场景**(commit ff8806b7,运行时开关在同一二进制内交替,
+  arm64 Release 3×3 中位数,μs):
+
+  | 场景段 | accel | legacy | Δ | 占全场景 |
+  |---|---|---|---|---|
+  | BasicShapes | 34.8 | 46.7 | -25% | ~2% |
+  | PathEffect | 173 | 188 | -8% | ~10% |
+  | DashStroke | 138 | 160 | -14% | ~8% |
+  | Text | 416 | 446 | -7% | ~25% |
+  | Gradient | 681 | 684 | 0 | ~40% |
+  | EvenOddFill | 25.5 | 35.1 | -27% | ~1.5% |
+
+  全场景 1670 vs 1894μs(-11.8%)。**内核在能到达的地方有效(纯 solid 填充
+  -25~27%),但收益天花板在覆盖范围而不在内核**:Gradient 完全不进 solid 路径;
+  Text 走 `DrawGlyphsInternal`→把字形轮廓当 path 光栅化(非 A8 atlas),
+  时间花在光栅化大量小轮廓而非混合。推论:剩余里程碑的收益排序为
+  M1b-4 gradient fetcher(~40%)> M2 glyph atlas(~25%)> 其余;
+  在这两项落地前,solid 内核再怎么优化对端到端都是个位数百分比。
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
+> **校准状态(2026-11)**:以下为开工前的机制推算,现在有实测锚点了。
+> **合成端 8-16×:已实测兑现**——纯混合微基准(BM_SWSolidBlend*,固定 span 表
+> 直灌 FillSolidSpans vs 同 span 逐像素 PorterDuffBlend,arm64 Release 三轮
+> 一致):SrcOver 14.4×、SrcOverOpaque 14.3×、SrcIn 13.3×、Modulate 13.6×,
+> 吞吐 ~16.6 Gpx/s vs ~1.16 Gpx/s;
+> **"整体场景 3-10×:不成立**——solid 内核接通后端到端仅 -12%(第 6 节分场景
+> 表)。差距来源不是内核不够快,而是推算只按"逐像素标量→SIMD"估了混合一段,
+> 没计入 (a)gradient/text 根本不经过被加速的路径(Gradient 40% + Text 25%),
+> (b)光栅化与 span 物化占其余大头。混合阶段已不再是瓶颈,后续收益排序:
+> M1b-4 gradient fetcher(~40%)> M2 glyph atlas(~25%)> 其余。
 - 合成端(逐像素标量→AVX2 批处理):微基准 8-16×;
 - 整体场景 3-10×,叠进程级并发近线性;
 - 对照:静态 SIMD 方案 ≈ blend2d JIT 的 85-95%(arm64 上 JIT 也只有 128-bit NEON,差距仅内联/常量折叠;两段式 span 税只落在 gradient/pattern 上),绝对量级对齐 Skia CPU raster;

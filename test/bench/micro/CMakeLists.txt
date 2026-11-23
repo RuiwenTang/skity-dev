@@ -29,3 +29,10 @@ target_link_libraries(skity_micro_bench
 )
 
 target_link_libraries(skity_micro_bench PRIVATE glm::glm-header-only)
+
+# sw_benchmarks.cc drives FillSolidSpans directly; it is hidden from the
+# shared library (only the runtime switch is exported), so the bench needs
+# the accelerator statically, like skity_unit_test.
+if(TARGET skity_sw_accel)
+  target_link_libraries(skity_micro_bench PRIVATE skity_sw_accel)
+endif()

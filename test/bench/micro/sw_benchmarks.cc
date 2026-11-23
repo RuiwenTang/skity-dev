@@ -11,6 +11,8 @@
 #include "src/render/sw/sw_span_brush.hpp"
 
 #ifdef SKITY_SW_ACCEL
+#include "src/graphic/blend_mode_priv.hpp"
+#include "src/graphic/color_priv.hpp"
 #include "src/render/sw/accel/sw_accel.hpp"
 
 // Scopes one A/B arm of the accelerator runtime switch; the global state is
@@ -96,6 +98,82 @@ SKITY_BENCH_SECTION(DashStroke, draw_dash_start_example, 0, 300)
 SKITY_BENCH_SECTION(Text, draw_simple_text, 520, 0)
 SKITY_BENCH_SECTION(Gradient, draw_linear_gradient_example, 400, 300)
 SKITY_BENCH_SECTION(EvenOddFill, draw_even_odd_fill, 800, 0)
+#endif
+
+// Pure blend cost, isolated from rasterization: a fixed span list is pushed
+// through FillSolidSpans, and through the per-pixel scalar blend the legacy
+// brush performs (PorterDuffBlend on each pixel). Measures the kernels
+// themselves rather than what fraction of a scene reaches them.
+#ifdef SKITY_SW_ACCEL
+namespace {
+
+constexpr int32_t kBlendW = 1000;
+constexpr int32_t kBlendH = 800;
+
+std::vector<skity::Span> BlendBenchSpans() {
+  // Long interior runs with a short AA-style tail, i.e. the span shape the
+  // walker emits for an opaque shape edge.
+  std::vector<skity::Span> spans;
+  spans.reserve(kBlendH * 2);
+  for (int32_t y = 0; y < kBlendH; y++) {
+    spans.push_back(skity::Span{8, y, 980, 255});
+    spans.push_back(skity::Span{988, y, 3, 128});
+  }
+  return spans;
+}
+
+template <bool kUseAccel, skity::BlendMode kMode, bool kOpaqueSrc>
+void RunSolidBlend(benchmark::State& state) {
+  std::vector<uint32_t> pixels(kBlendW * kBlendH);
+  const std::vector<skity::Span> spans = BlendBenchSpans();
+  // Half-transparent src keeps the blend arithmetic from being short-
+  // circuited; opaque src exercises the common opaque-fill case.
+  const uint32_t src_pm = kOpaqueSrc ? 0xff3366ccu : 0x803366ccu;
+  uint8_t* base = reinterpret_cast<uint8_t*>(pixels.data());
+
+  for (auto _ : state) {
+    if constexpr (kUseAccel) {
+      skity::sw_accel::FillSolidSpans(kMode, src_pm, base, kBlendW * 4, kBlendW,
+                                      kBlendH, spans.data(), spans.size());
+    } else {
+      for (const skity::Span& span : spans) {
+        uint32_t* row = pixels.data() + static_cast<size_t>(span.y) * kBlendW +
+                        span.x;
+        const uint32_t src =
+            span.cover == 255 ? src_pm : skity::AlphaMulQ(src_pm, span.cover);
+        for (int32_t i = 0; i < span.len; i++) {
+          // Memory words are kRGBA; blend in the PMColor convention.
+          row[i] = skity::PMColorSwapRB(skity::PorterDuffBlend(
+              src, skity::PMColorSwapRB(row[i]), kMode));
+        }
+      }
+    }
+    // Passing an lvalue binds DoNotOptimize to the non-deprecated overload
+    // and keeps the buffer writes observable across iterations.
+    uint32_t* sink = pixels.data();
+    benchmark::DoNotOptimize(sink);
+    benchmark::ClobberMemory();
+  }
+  state.SetItemsProcessed(state.iterations() *
+                          static_cast<int64_t>(spans.size()) * 983);
+}
+
+}  // namespace
+
+#define SKITY_BENCH_BLEND(name, mode, opaque)                               \
+  static void BM_SWSolidBlend_##name(benchmark::State& state) {             \
+    RunSolidBlend<true, skity::BlendMode::mode, opaque>(state);             \
+  }                                                                        \
+  BENCHMARK(BM_SWSolidBlend_##name)->Unit(benchmark::kMicrosecond);         \
+  static void BM_SWSolidBlend_##name##_Scalar(benchmark::State& state) {    \
+    RunSolidBlend<false, skity::BlendMode::mode, opaque>(state);            \
+  }                                                                        \
+  BENCHMARK(BM_SWSolidBlend_##name##_Scalar)->Unit(benchmark::kMicrosecond);
+
+SKITY_BENCH_BLEND(SrcOver, kSrcOver, false)
+SKITY_BENCH_BLEND(SrcOverOpaque, kSrcOver, true)
+SKITY_BENCH_BLEND(SrcIn, kSrcIn, false)
+SKITY_BENCH_BLEND(Modulate, kModulate, false)
 #endif
 
 static void BM_SWExampleUnpremulAlpha(benchmark::State& state) {
