@@ -38,7 +38,9 @@ class SWSpanBrush {
 
   virtual ~SWSpanBrush() = default;
 
-  void Brush();
+  // Virtual so accelerated brushes can take the whole span list in one pass
+  // (the per-span BrushH extension point alone is too fine-grained for them).
+  virtual void Brush();
 
  protected:
   // premultiplied color

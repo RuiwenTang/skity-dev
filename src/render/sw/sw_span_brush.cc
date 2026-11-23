@@ -4,6 +4,12 @@
 
 #include "src/render/sw/sw_span_brush.hpp"
 
+#include <cmath>
+
+#ifdef SKITY_SW_ACCEL
+#include "src/render/sw/accel/sw_accel.hpp"
+#endif
+
 #include <skity/effect/color_filter.hpp>
 #include <skity/graphic/bitmap.hpp>
 
@@ -529,10 +535,135 @@ class ConicalGradientColorBrush : public GradientColorBrush {
   Matrix cfc1_tranform_ = {};
 };
 
+#ifdef SKITY_SW_ACCEL
+// Gradient fill through the SIMD accelerator: precomputes the stop table in
+// OnPreBrush and hands the whole span list to sw_accel::FillGradientSpans in
+// one pass. The kernel chain is bit-exact with the scalar brush, so the only
+// accepted configurations are the ones whose legacy math it reproduces;
+// everything else (sweep/conical, other blend modes, unpremul or non-RGBA
+// surfaces, color filters, degenerate gradients) keeps the legacy path.
+class AcceleratedGradientColorBrush : public GradientColorBrush {
+ public:
+  AcceleratedGradientColorBrush(std::vector<Span> const& spans, Bitmap* bitmap,
+                                ColorFilter* color_filter, BlendMode blend,
+                                Shader::GradientInfo info,
+                                Shader::GradientType type,
+                                const Matrix& device_to_local)
+      : GradientColorBrush(spans, bitmap, color_filter, blend, info, type),
+        device_to_local_(device_to_local) {}
+
+  ~AcceleratedGradientColorBrush() override = default;
+
+  void Brush() override {
+    // Brush() runs before the base class would call OnPreBrush(), so the
+    // params (including the LUT build) are constructed here, once, lazily -
+    // and only when the accelerator would actually run, so the legacy
+    // fallback arm never pays for them.
+    if (!params_built_ && sw_accel::IsEnabled() && sw_accel::Available()) {
+      params_built_ = true;
+      use_accel_ = BuildParams();
+    }
+    if (use_accel_) {
+      Bitmap* bitmap = CurrentBitmap();
+      if (sw_accel::FillGradientSpans(
+              params_, GetBlendMode(), bitmap->GetPixelAddr(),
+              bitmap->RowBytes(), static_cast<int32_t>(bitmap->Width()),
+              static_cast<int32_t>(bitmap->Height()), GetSpans(),
+              GetSpanSize())) {
+        return;
+      }
+      // Disabled or unavailable at draw time; nothing has been written yet.
+    }
+    SWSpanBrush::Brush();
+  }
+
+ private:
+  bool BuildParams() {
+    if (!sw_accel::Available()) {
+      return false;
+    }
+    const auto& offsets = info_.color_offsets;
+    const int32_t count = static_cast<int32_t>(info_.colors.size());
+    // A short offsets table would read out of bounds below (the legacy scan
+    // has the same assumption); keep such gradients on the scalar path.
+    if (count < 2 || (!offsets.empty() && offsets.size() < info_.colors.size())) {
+      return false;
+    }
+    const Matrix m = PointsToUnit(info_, type_) * device_to_local_;
+    params_.type = type_ == Shader::GradientType::kRadial ? 1 : 0;
+    params_.m00 = m.GetScaleX();
+    params_.m01 = m.GetSkewX();
+    params_.m02 = m.GetTranslateX();
+    params_.m10 = m.GetSkewY();
+    params_.m11 = m.GetScaleY();
+    params_.m12 = m.GetTranslateY();
+    const float values[6] = {params_.m00, params_.m01, params_.m02,
+                             params_.m10, params_.m11, params_.m12};
+    for (float v : values) {
+      // Degenerate transforms make t non-finite.
+      if (!std::isfinite(v)) {
+        return false;
+      }
+    }
+    params_.tile_mode = static_cast<int32_t>(info_.tile_mode);
+    params_.use_offsets = !offsets.empty();
+    if (params_.use_offsets) {
+      params_.first_offset = offsets.front();
+    }
+    params_.color_count = count;
+    // Segment table with the legacy values: declared offsets, or the uniform
+    // step grid (LerpColor computes step * i with the same float ops).
+    const float step = 1.f / (count - 1);
+    seg_start_.resize(static_cast<size_t>(count) - 1);
+    seg_end_.resize(static_cast<size_t>(count) - 1);
+    for (int32_t i = 0; i < count - 1; i++) {
+      if (params_.use_offsets) {
+        seg_start_[i] = offsets[i];
+        seg_end_[i] = offsets[i + 1];
+      } else {
+        seg_start_[i] = step * i;
+        seg_end_[i] = step * (i + 1);
+      }
+    }
+    params_.seg_start = seg_start_.data();
+    params_.seg_end = seg_end_.data();
+    params_.colors = &info_.colors.front().e[0];
+    // Bake the stop chain into the 512-entry LUT the kernels fetch from.
+    lut_.resize(512);
+    if (!sw_accel::BuildGradientLUT(params_, lut_.data())) {
+      return false;
+    }
+    params_.lut = lut_.data();
+    params_.lut_entries = static_cast<int32_t>(lut_.size());
+    return true;
+  }
+
+  Matrix device_to_local_ = {};
+  sw_accel::GradientParams params_ = {};
+  std::vector<float> seg_start_;
+  std::vector<float> seg_end_;
+  std::vector<uint32_t> lut_;
+  bool params_built_ = false;
+  bool use_accel_ = false;
+};
+#endif
+
 std::unique_ptr<GradientColorBrush> GradientColorBrush::MakeGradientColorBrush(
     std::vector<Span> const& spans, Bitmap* bitmap, ColorFilter* color_filter,
     BlendMode blend, Shader::GradientInfo info, Shader::GradientType type,
     const Matrix& device_to_local) {
+#ifdef SKITY_SW_ACCEL
+  if (color_filter == nullptr &&
+      (blend == BlendMode::kSrcOver || blend == BlendMode::kSrc) &&
+      (type == Shader::GradientType::kLinear ||
+       type == Shader::GradientType::kRadial) &&
+      info.colors.size() >= 2 &&
+      bitmap->GetAlphaType() == AlphaType::kPremul_AlphaType &&
+      bitmap->GetColorType() == ColorType::kRGBA) {
+    return std::make_unique<AcceleratedGradientColorBrush>(
+        spans, bitmap, color_filter, blend, info, type, device_to_local);
+  }
+#endif
   switch (type) {
     case Shader::GradientType::kLinear:
       return std::make_unique<LinearGradientColorBrush>(

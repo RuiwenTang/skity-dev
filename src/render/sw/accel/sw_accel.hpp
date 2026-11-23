@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include <skity/graphic/blend_mode.hpp>
+#include <skity/graphic/tile_mode.hpp>
 
 #include "src/render/sw/sw_subpixel.hpp"
 
@@ -62,6 +63,61 @@ bool FillSolidSpans(BlendMode mode, uint32_t src_pm, uint8_t* dst_base,
 
 // Returns true when FillSolidSpans supports the blend mode.
 bool SupportsSolidMode(BlendMode mode);
+
+// Precomputed, POD description of one gradient draw, built by the software
+// brush after resolving the shader into stops and a device-space transform.
+//
+// The per-pixel t keeps the legacy evaluation order exactly (MapPoint of
+// {x + 0.5f, y + 0.5f}, nearly-zero snapping, tile remap). The color for a
+// given t comes from a 512-entry LUT built per draw by BuildGradientLUT()
+// from the legacy chain (tile handling, stop scan, lerp, u8 conversion,
+// rounding premul), interpolated between adjacent entries - the same design
+// as Skia/blend2D CPU gradients. This trades bit-exactness with the scalar
+// brush for speed: the difference is bounded by about 2 per channel, within
+// the GPU cross-tolerance.
+struct GradientParams {
+  // 0 = linear (t = u), 1 = radial (t = sqrt(u*u + v*v)).
+  int32_t type;
+  // Entries of points_to_unit_ (the unit-space matrix in device coordinates).
+  // u = ((x + 0.5f) * m00 + (y + 0.5f) * m01) + m02, likewise v with m1x.
+  float m00, m01, m02;
+  float m10, m11, m12;
+  // skity::TileMode value (kClamp / kRepeat / kMirror / kDecal).
+  int32_t tile_mode;
+
+  // Stop table consumed by BuildGradientLUT (the kernels only read the LUT).
+  bool use_offsets;  // explicit offsets present (legacy early-out applies)
+  float first_offset;
+  // color_count >= 2 stops; colors is color_count * 4 floats (r, g, b, a).
+  int32_t color_count;
+  const float* seg_start;  // color_count - 1 entries
+  const float* seg_end;    // color_count - 1 entries
+  const float* colors;
+
+  // Premul memory words (0xAABBGGRR) built by BuildGradientLUT; entries is
+  // 512 and lut[i] is the legacy result at t = i / 511 (the last entry
+  // holds the left limit at t = 1).
+  const uint32_t* lut;
+  int32_t lut_entries;
+};
+
+// Builds the 512-entry gradient LUT for the stop table in params (which must
+// describe a supported gradient: color_count >= 2, finite transform, and
+// seg tables covering every stop). Returns false without touching lut on
+// unsupported input.
+bool BuildGradientLUT(const GradientParams& params, uint32_t* lut);
+
+// Fills a span list with gradient colors fetched per pixel and blended with
+// the given mode. Destination contract is the same as FillSolidSpans
+// (premul ColorType::kRGBA; spans clamped to the surface). Coverage is
+// folded into each fetched color with AlphaMulQ, like the legacy brush.
+//
+// Supported today: linear and radial gradients (kSrc and kSrcOver). Returns
+// false (without touching pixels) when the gradient type or blend mode is
+// unsupported or the accelerator is unavailable/disabled.
+bool FillGradientSpans(const GradientParams& params, BlendMode mode,
+                       uint8_t* dst_base, size_t row_bytes, int32_t width,
+                       int32_t height, const Span* spans, size_t span_count);
 
 }  // namespace sw_accel
 }  // namespace skity

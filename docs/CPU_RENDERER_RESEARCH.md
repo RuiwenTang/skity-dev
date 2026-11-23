@@ -190,6 +190,37 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   M1b-4 gradient fetcher(~40%)> M2 glyph atlas(~25%)> 其余;
   在这两项落地前,solid 内核再怎么优化对端到端都是个位数百分比。
 
+**M1b-4a 记录(2026-11,arm64,linear/radial + Src/SrcOver)**:
+- 设计从"逐像素精确链"中途转向 **512 项 LUT**(Skia/blend2d 同款):精确链的
+  逐像素停点搜索 + 动态 gather + 栈往返使其与 legacy 标量打平(实测 0 收益),
+  LUT 把检索变为 定点索引 + 2 次标量取数 + u16 有符号增量 lerp;LUT 由
+  `BuildGradientLUT` 用精确 legacy 链逐项烘焙(含 tile/硬停点/预乘),
+  t 的计算(map/snap/remap/decal)保持与 legacy 逐位一致;
+- 精度契约:与 legacy 标量链差 ≤4/通道(网格量化+lerp 舍入+premul 插值次序
+  叠加),远小于 GPU 交叉容差;kRepeat 的 t→1 不连续(fract(1)=0 跳回
+  colors[0])用**左极限约定**(LUT 末项取 t=1-2/4096),legacy 在 snap 带内
+  自身的 1px 翻转语义不复刻;
+- 本片连环坑(全部已修,均有单测锁定):①`SWSpanBrush::Brush()` 非虚——
+  加速 brush 的覆写从未被调用,加速臂静默跑 legacy;②decal/edge/last 三个
+  早退的覆盖顺序,decal 必须最外层;③kRepeat 包裹接缝的 LUT 跨跳变插值;
+  ④`1.0f-FLT_EPSILON` 舍入回 1.0f,且 legacy 的 snap 带宽 1/4096 吞掉一切
+  ulp 级左极限——左极限必须在 snap 带外取;⑤min/max 化 lerp 把权重镜像
+  (下降通道算成 true(1-f)),f≈1 时落到错误端点——必须用有符号增量+
+  算术右移;⑥加速 brush 的 LUT 构建在开关检查之前执行,legacy 臂白交税;
+- **既有的跨架构不一致(待决策)**:arm 的 legacy NEON 混合
+  (`PMSrcOverNeon` 等)与标量 `PorterDuffBlend` 在 28.6% 的 (sa,d) 组合上
+  差 ±1(穷举验证)——x86 与 arm 的 legacy 渲染本来就不一致。accel 锚定
+  标量语义,开启 accel 反而使 CPU 输出跨架构确定;是否把 NEON 统一到
+  标量语义(改变 arm 既有输出 ±1)留给单独决策;
+- 附带发现:Highway 的 NEON `Sqrt` 是 rsqrte+NR 近似(非正确舍入),精确
+  链方案下会是隐患,LUT 方案将其吸收;
+- 性能(arm64,M 系列):**持平**——Gradient 段两臂均 ~175μs。该机器标量
+  浮点极强,legacy 逐像素链本来就快;收益预期要在部署目标 x86 KVM 上
+  验证(标量吞吐相对向量更弱,预期收益更大),列入 M1b-4d;
+- 端到端测试改为容差(accel vs legacy ≤4/通道,含 NEON ±1 叠加),
+  fetch 级独立标量镜像 60 轮随机配置 ≤4,Validate 保险丝扩至 4 个梯度
+  内核(容差 4,repeat 接缝带跳过)。
+
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
 > **校准状态(2026-11)**:以下为开工前的机制推算,现在有实测锚点了。
