@@ -91,6 +91,7 @@ add_executable(skity_unit_test
     graphic/bitmap_test.cc
     graphic/color_space_test.cc
     graphic/color_test.cc
+    graphic/blend_mode_test.cc
     graphic/color_transform_test.cc
     graphic/image_test.cc
     graphic/path_measure_test.cc
