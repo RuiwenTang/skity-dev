@@ -39,6 +39,20 @@ HWY_EXPORT(SolidRunXorKernel);
 HWY_EXPORT(SolidRunPlusKernel);
 HWY_EXPORT(SolidRunModulateKernel);
 HWY_EXPORT(SolidRunScreenKernel);
+HWY_EXPORT(SolidRunOverlayKernel);
+HWY_EXPORT(SolidRunDarkenKernel);
+HWY_EXPORT(SolidRunLightenKernel);
+HWY_EXPORT(SolidRunColorDodgeKernel);
+HWY_EXPORT(SolidRunColorBurnKernel);
+HWY_EXPORT(SolidRunHardLightKernel);
+HWY_EXPORT(SolidRunSoftLightKernel);
+HWY_EXPORT(SolidRunDifferenceKernel);
+HWY_EXPORT(SolidRunExclusionKernel);
+HWY_EXPORT(SolidRunMultiplyKernel);
+HWY_EXPORT(SolidRunHueKernel);
+HWY_EXPORT(SolidRunSaturationKernel);
+HWY_EXPORT(SolidRunColorKernel);
+HWY_EXPORT(SolidRunLuminosityKernel);
 
 HWY_EXPORT(GradientRunLinearSrcKernel);
 HWY_EXPORT(GradientRunRadialSrcKernel);
@@ -99,6 +113,34 @@ RunKernelFn SelectRunKernel(BlendMode mode) {
       return HWY_DYNAMIC_DISPATCH(SolidRunModulateKernel);
     case BlendMode::kScreen:
       return HWY_DYNAMIC_DISPATCH(SolidRunScreenKernel);
+    case BlendMode::kOverlay:
+      return HWY_DYNAMIC_DISPATCH(SolidRunOverlayKernel);
+    case BlendMode::kDarken:
+      return HWY_DYNAMIC_DISPATCH(SolidRunDarkenKernel);
+    case BlendMode::kLighten:
+      return HWY_DYNAMIC_DISPATCH(SolidRunLightenKernel);
+    case BlendMode::kColorDodge:
+      return HWY_DYNAMIC_DISPATCH(SolidRunColorDodgeKernel);
+    case BlendMode::kColorBurn:
+      return HWY_DYNAMIC_DISPATCH(SolidRunColorBurnKernel);
+    case BlendMode::kHardLight:
+      return HWY_DYNAMIC_DISPATCH(SolidRunHardLightKernel);
+    case BlendMode::kSoftLight:
+      return HWY_DYNAMIC_DISPATCH(SolidRunSoftLightKernel);
+    case BlendMode::kDifference:
+      return HWY_DYNAMIC_DISPATCH(SolidRunDifferenceKernel);
+    case BlendMode::kExclusion:
+      return HWY_DYNAMIC_DISPATCH(SolidRunExclusionKernel);
+    case BlendMode::kMultiply:
+      return HWY_DYNAMIC_DISPATCH(SolidRunMultiplyKernel);
+    case BlendMode::kHue:
+      return HWY_DYNAMIC_DISPATCH(SolidRunHueKernel);
+    case BlendMode::kSaturation:
+      return HWY_DYNAMIC_DISPATCH(SolidRunSaturationKernel);
+    case BlendMode::kColor:
+      return HWY_DYNAMIC_DISPATCH(SolidRunColorKernel);
+    case BlendMode::kLuminosity:
+      return HWY_DYNAMIC_DISPATCH(SolidRunLuminosityKernel);
     default:
       return nullptr;
   }
@@ -233,6 +275,23 @@ void ValidateOnce() {
       {BlendMode::kPlus, HWY_DYNAMIC_DISPATCH(SolidRunPlusKernel)},
       {BlendMode::kModulate, HWY_DYNAMIC_DISPATCH(SolidRunModulateKernel)},
       {BlendMode::kScreen, HWY_DYNAMIC_DISPATCH(SolidRunScreenKernel)},
+      {BlendMode::kOverlay, HWY_DYNAMIC_DISPATCH(SolidRunOverlayKernel)},
+      {BlendMode::kDarken, HWY_DYNAMIC_DISPATCH(SolidRunDarkenKernel)},
+      {BlendMode::kLighten, HWY_DYNAMIC_DISPATCH(SolidRunLightenKernel)},
+      {BlendMode::kColorDodge, HWY_DYNAMIC_DISPATCH(SolidRunColorDodgeKernel)},
+      {BlendMode::kColorBurn, HWY_DYNAMIC_DISPATCH(SolidRunColorBurnKernel)},
+      {BlendMode::kHardLight, HWY_DYNAMIC_DISPATCH(SolidRunHardLightKernel)},
+      {BlendMode::kDifference, HWY_DYNAMIC_DISPATCH(SolidRunDifferenceKernel)},
+      {BlendMode::kExclusion, HWY_DYNAMIC_DISPATCH(SolidRunExclusionKernel)},
+      {BlendMode::kMultiply, HWY_DYNAMIC_DISPATCH(SolidRunMultiplyKernel)},
+      // kSoftLight is deliberately absent: Highway's NEON Sqrt is an
+      // rsqrte+NR approximation, so the kernel differs from std::sqrt by
+      // ~1 ulp and a bit-exact fuse would trip; the unit tests cover it
+      // with a +/-1 tolerance instead.
+      {BlendMode::kHue, HWY_DYNAMIC_DISPATCH(SolidRunHueKernel)},
+      {BlendMode::kSaturation, HWY_DYNAMIC_DISPATCH(SolidRunSaturationKernel)},
+      {BlendMode::kColor, HWY_DYNAMIC_DISPATCH(SolidRunColorKernel)},
+      {BlendMode::kLuminosity, HWY_DYNAMIC_DISPATCH(SolidRunLuminosityKernel)},
   };
   // Premul src colors (channel values bounded by alpha): the mixed
   // Porter-Duff sums are byte-safe only on premul operands, which is the
@@ -390,7 +449,10 @@ bool Available() {
 }
 
 bool SupportsSolidMode(BlendMode mode) {
-  return mode <= BlendMode::kLastCoeffMode;
+  // Every mode has a kernel: coeff modes in integer SIMD, separable advanced
+  // modes in f32 SIMD (WGSL formulas), and the cross-channel HSL modes as
+  // scalar loops behind the same table.
+  return mode <= BlendMode::kLastMode;
 }
 
 void SetEnabled(bool enabled) {

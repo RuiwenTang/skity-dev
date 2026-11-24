@@ -174,6 +174,8 @@ SKITY_BENCH_BLEND(SrcOver, kSrcOver, false)
 SKITY_BENCH_BLEND(SrcOverOpaque, kSrcOver, true)
 SKITY_BENCH_BLEND(SrcIn, kSrcIn, false)
 SKITY_BENCH_BLEND(Modulate, kModulate, false)
+SKITY_BENCH_BLEND(Overlay, kOverlay, false)
+SKITY_BENCH_BLEND(ColorDodge, kColorDodge, false)
 #endif
 
 static void BM_SWExampleUnpremulAlpha(benchmark::State& state) {

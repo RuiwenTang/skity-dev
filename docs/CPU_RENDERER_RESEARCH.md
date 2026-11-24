@@ -256,6 +256,28 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   渐变每线程一次构建,缓存跨帧保温)或交付时拷贝 2KB 表;除非 profiling
   证明两者皆痛,不引入共享引用计数缓存。
 
+**M1 收尾记录(2026-11,28 模式全表完成)**:
+- **标量参考先行**:advanced 模式此前在 CPU 上回退 kSrcOver(LOGE)+私有
+  unpremul SoftLight,与 GPU 不一致。现 `PorterDuffBlend` 将 14 个 advanced
+  模式(Overlay/Darken/Lighten/ColorDodge/ColorBurn/HardLight/SoftLight/
+  Difference/Exclusion/Multiply + 4 HSL)全部路由到 premul f32 域的
+  `AdvancedBlend`——逐表达式镜像 GPU 的 WGSL 生成代码(含 component 助手
+  的 guard、SrcOver 结果 alpha、HSL 的 set-color-luminance/saturation);
+  量化 = clamp[0,1] × 255 + 0.5 截断,与内核逐位镜像。arm NEON 路径对全部
+  advanced 模式旁路(它对未实现模式静默不写,原守卫只挡 SoftLight);
+- **内核分三档**:coeff 模式 = 整数 SIMD(位精确,14×);可分离 advanced =
+  f32 SIMD(交错布局 + alpha 广播 + 逐 lane select,除法用 IEEE 精确向量
+  Div、guard 的未选分支产生的 Inf/NaN 被 select 丢弃——与标量 select 同构;
+  位精确,SoftLight 因 Highway NEON Sqrt 近似为 ±1,保险丝表有意不含它);
+  4 个 HSL 跨通道 = 标量内核(直接调 PorterDuffBlend,位一致由构造保证,
+  向量化留待确有需求时);`SupportsSolidMode` → 全部 kLastMode;
+- 实测(arm64):Overlay 3.0×、ColorDodge 2.7×(f32 域 + 转换固有开销,
+  对比整数域 14×);28 模式 × 20 轮随机位精确矩阵通过;
+- **M1 至此完整交付**:M1a 行缓冲、M1b 全模式内核表 + 函数表 dispatch +
+  Validate 保险丝 + premul 强制 + gradient LUT 加速器,x86(-66%)/arm64
+  双平台验证。遗留:M2 结构项(glyph atlas/clip/行直连)、sweep/conical、
+  AVX2 独立 TU(M4)。
+
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
 > **校准状态(2026-11)**:以下为开工前的机制推算,现在有实测锚点了。

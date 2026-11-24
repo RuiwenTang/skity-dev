@@ -104,9 +104,12 @@ TEST(SWAccel, ValidatePasses) {
 
 TEST(SWAccel, SolidSpansMatchScalarReference) {
   uint32_t state = 0x9e3779b9u;
-  // Every Porter-Duff coeff mode, kClear through kScreen.
+  // Every blend mode, kClear through kLuminosity: coeff modes in integer
+  // SIMD, advanced modes in f32 SIMD against the WGSL-aligned scalar
+  // reference. kSoftLight carries a +/-1 tolerance (Highway's NEON Sqrt is
+  // an rsqrte approximation); everything else is bit-exact.
   std::vector<BlendMode> modes;
-  for (int m = 0; m <= static_cast<int>(BlendMode::kLastCoeffMode); m++) {
+  for (int m = 0; m <= static_cast<int>(BlendMode::kLastMode); m++) {
     modes.push_back(static_cast<BlendMode>(m));
   }
   const uint32_t edge_colors[] = {0x00000000u, 0xffffffffu, 0x80404040u};
@@ -128,7 +131,19 @@ TEST(SWAccel, SolidSpansMatchScalarReference) {
           mode, src_pm, reinterpret_cast<uint8_t*>(actual.data()),
           kWidth * 4, kWidth, kHeight, spans.data(), spans.size()));
       FillReference(expect, spans, mode, src_pm);
-      ASSERT_EQ(expect, actual) << "round " << round;
+      if (mode == BlendMode::kSoftLight) {
+        for (size_t i = 0; i < expect.size(); i++) {
+          for (int shift = 0; shift < 32; shift += 8) {
+            const int32_t d =
+                static_cast<int32_t>((expect[i] >> shift) & 0xff) -
+                static_cast<int32_t>((actual[i] >> shift) & 0xff);
+            ASSERT_LE(d < 0 ? -d : d, 1)
+                << "round " << round << " pixel " << i << " shift " << shift;
+          }
+        }
+      } else {
+        ASSERT_EQ(expect, actual) << "round " << round;
+      }
     }
   }
 }
@@ -149,16 +164,11 @@ TEST(SWAccel, SolidSpansClampOutOfBounds) {
   EXPECT_EQ(expect, actual);
 }
 
-TEST(SWAccel, UnsupportedModeFallsBack) {
-  // Advanced (non-coeff) modes are not in the kernel table yet.
-  EXPECT_FALSE(skity::sw_accel::SupportsSolidMode(BlendMode::kOverlay));
-  std::vector<uint32_t> bitmap(kWidth, 0xffffffffu);
-  Span span{0, 0, 4, 255};
-  EXPECT_FALSE(FillSolidSpans(BlendMode::kOverlay, 0xff000000u,
-                              reinterpret_cast<uint8_t*>(bitmap.data()),
-                              kWidth * 4, kWidth, 1, &span, 1));
-  // Nothing was written.
-  EXPECT_EQ(0xffffffffu, bitmap[0]);
+TEST(SWAccel, SupportsSolidModeCoversEveryMode) {
+  // The kernel table is complete: every BlendMode value is supported.
+  for (int m = 0; m <= static_cast<int>(BlendMode::kLastMode); m++) {
+    EXPECT_TRUE(skity::sw_accel::SupportsSolidMode(static_cast<BlendMode>(m)));
+  }
 }
 
 TEST(SWAccel, RuntimeSwitchTogglesFallback) {

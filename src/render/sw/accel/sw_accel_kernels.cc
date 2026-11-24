@@ -377,6 +377,269 @@ void SolidRunScreenKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 }
 
 // ---------------------------------------------------------------------------
+// Advanced blend kernels
+// ---------------------------------------------------------------------------
+
+// Computes one advanced (non-coeff) blend component per byte lane in the
+// interleaved layout: the lane holds a premultiplied channel, and the alpha
+// operands arrive pre-broadcast to every lane of their pixel. Formulas
+// mirror the scalar AdvancedBlend reference (and behind it the WGSL
+// functions) expression for expression; divisions are IEEE-exact vector
+// divisions, guards are lane-wise selects whose unused branches may produce
+// Inf/NaN that the select discards, exactly like the scalar select.
+template <BlendMode MODE, class F>
+static inline F AdvancedComponent(F sf, F saf, F df, F daf) {
+  const hn::DFromV<F> f32;
+  const F zero = hn::Zero(f32);
+  const F one = hn::Set(f32, 1.0f);
+  const F two = hn::Set(f32, 2.0f);
+  const F kMinNormalHalf = hn::Set(f32, 0.0001f);
+  if constexpr (MODE == BlendMode::kOverlay || MODE == BlendMode::kHardLight) {
+    // HardLight is Overlay with the operands swapped.
+    const F sc = MODE == BlendMode::kHardLight ? df : sf;
+    const F sa = MODE == BlendMode::kHardLight ? daf : saf;
+    const F dc = MODE == BlendMode::kHardLight ? sf : df;
+    const F da = MODE == BlendMode::kHardLight ? saf : daf;
+    const F mul2 = hn::Mul(two, dc);
+    const F base = hn::IfThenElse(hn::Le(mul2, da), hn::Mul(two, hn::Mul(sc, dc)),
+                                  hn::Sub(hn::Mul(sa, da),
+                                          hn::Mul(two, hn::Mul(hn::Sub(da, dc),
+                                                               hn::Sub(sa, sc)))));
+    // extra = dst * (1 - sa) + src * (1 - da), alpha zeroed.
+    return hn::Add(base, hn::Add(hn::Mul(df, hn::Sub(one, saf)),
+                                 hn::Mul(sf, hn::Sub(one, daf))));
+  } else if constexpr (MODE == BlendMode::kDarken ||
+                       MODE == BlendMode::kLighten) {
+    const F over = hn::Add(sf, hn::Mul(hn::Sub(one, saf), df));
+    const F other = hn::Add(hn::Mul(hn::Sub(one, daf), sf), df);
+    if constexpr (MODE == BlendMode::kDarken) {
+      return hn::Min(over, other);
+    } else {
+      return hn::Max(over, other);
+    }
+  } else if constexpr (MODE == BlendMode::kColorDodge) {
+    const F dx_scale = hn::IfThenElse(hn::Eq(df, zero), zero, one);
+    const F guarded = hn::IfThenElse(
+        hn::Ge(hn::Abs(hn::Sub(saf, sf)), kMinNormalHalf),
+        hn::Div(hn::Mul(df, saf), hn::Sub(saf, sf)), daf);
+    const F delta = hn::Mul(dx_scale, hn::Min(daf, guarded));
+    return hn::Add(hn::Add(hn::Mul(delta, saf),
+                           hn::Mul(sf, hn::Sub(one, daf))),
+                   hn::Mul(df, hn::Sub(one, saf)));
+  } else if constexpr (MODE == BlendMode::kColorBurn) {
+    const F dy_term = hn::IfThenElse(hn::Eq(daf, df), daf, zero);
+    const F delta = hn::IfThenElse(
+        hn::Ge(hn::Abs(sf), kMinNormalHalf),
+        hn::Sub(daf, hn::Min(daf, hn::Div(hn::Mul(hn::Sub(daf, df), saf), sf))),
+        dy_term);
+    return hn::Add(hn::Add(hn::Mul(delta, saf),
+                           hn::Mul(sf, hn::Sub(one, daf))),
+                   hn::Mul(df, hn::Sub(one, saf)));
+  } else if constexpr (MODE == BlendMode::kSoftLight) {
+    // sa - 2*sc (reused) and -sa + 2*sc + 1, mirrored left-to-right from the
+    // scalar helper (IEEE addition commutes bit-exactly, so Sub orderings
+    // that differ by sign only are still exact).
+    const F sm2 = hn::Sub(saf, hn::Mul(two, sf));
+    const F m2s_p1 = hn::Add(hn::Sub(hn::Mul(two, sf), saf), one);
+    const F branch_a =
+        hn::Add(hn::Add(hn::Div(hn::Mul(hn::Mul(df, df), sm2), daf),
+                        hn::Mul(hn::Sub(one, daf), sf)),
+                hn::Mul(df, m2s_p1));
+    // (da^2 * (sc - dc*(3*sa - 6*sc - 1)) + 12*da*dc^2*(sa-2*sc)
+    //  - 16*dc^3*(sa-2*sc) - da^3*sc) / da^2, same association as scalar.
+    const F d_sq = hn::Mul(df, df);
+    const F d_cu = hn::Mul(d_sq, df);
+    const F da_sq = hn::Mul(daf, daf);
+    const F da_cu = hn::Mul(da_sq, daf);
+    const F inner3 =
+        hn::Sub(hn::Sub(hn::Mul(hn::Set(f32, 3.f), saf),
+                        hn::Mul(hn::Set(f32, 6.f), sf)),
+                one);
+    const F t_a = hn::Mul(da_sq, hn::Sub(sf, hn::Mul(df, inner3)));
+    const F t_b = hn::Mul(hn::Mul(hn::Set(f32, 12.f), daf),
+                          hn::Mul(d_sq, sm2));
+    const F t_c = hn::Mul(hn::Mul(hn::Set(f32, 16.f), d_cu), sm2);
+    const F t_d = hn::Mul(da_cu, sf);
+    const F branch_b = hn::Div(hn::Sub(hn::Sub(hn::Add(t_a, t_b), t_c), t_d),
+                               da_sq);
+    const F branch_c =
+        hn::Sub(hn::Sub(hn::Add(hn::Mul(df, hn::Add(sm2, one)), sf),
+                        hn::Mul(hn::Sqrt(hn::Mul(daf, df)), sm2)),
+                hn::Mul(daf, sf));
+    F res = hn::IfThenElse(hn::Le(hn::Mul(two, sf), saf), branch_a,
+                           hn::IfThenElse(
+                               hn::Le(hn::Mul(hn::Set(f32, 4.f), df), daf),
+                               branch_b, branch_c));
+    // dst.a == 0 -> the whole result is src.
+    res = hn::IfThenElse(hn::Eq(daf, zero), sf, res);
+    return res;
+  } else if constexpr (MODE == BlendMode::kDifference) {
+    return hn::Sub(hn::Add(sf, df),
+                   hn::Mul(two, hn::Min(hn::Mul(sf, daf), hn::Mul(df, saf))));
+  } else if constexpr (MODE == BlendMode::kExclusion) {
+    return hn::Sub(hn::Add(df, sf), hn::Mul(two, hn::Mul(df, sf)));
+  } else if constexpr (MODE == BlendMode::kMultiply) {
+    return hn::Add(hn::Add(hn::Mul(hn::Sub(one, saf), df),
+                           hn::Mul(hn::Sub(one, daf), sf)),
+                   hn::Mul(sf, df));
+  }
+}
+
+// Engine for the separable advanced modes. Each group is processed as
+// quarter-width u8 sub-chunks converted to f32 (one lane per byte), the
+// component formula runs lane-wise with pre-broadcast alphas, and the result
+// is spliced with the composite alpha (sa + (1 - sa) * da, or src on
+// SoftLight's transparent-dst path) back into the interleaved bytes.
+// Quantization mirrors the scalar reference exactly: clamp [0, 1], * 255,
+// + 0.5, truncating convert.
+template <BlendMode MODE>
+static void AdvancedRunKernelT(uint8_t* HWY_RESTRICT dst, size_t count,
+                               uint32_t src_pm) {
+  const hn::ScalableTag<uint8_t> d8;
+  const hn::Half<hn::Half<decltype(d8)>> df8;
+  const hn::Rebind<uint32_t, decltype(df8)> du32;
+  const hn::Rebind<float, decltype(df8)> df32;
+  const size_t vl = hn::Lanes(d8);
+  const size_t sub = hn::Lanes(df8);  // f32 lanes per sub-chunk
+
+  alignas(64) uint8_t src_bytes[64];
+  FillSrcBytes(src_bytes, src_pm, vl / 4);
+
+  const auto k255f = hn::Set(df32, 255.0f);
+  const auto kHalf = hn::Set(df32, 0.5f);
+  const auto kOne = hn::Set(df32, 1.0f);
+  const auto kInv255 = hn::Set(df32, 255.0f);
+  const auto zero32 = hn::Zero(du32);
+
+  // Lane mask selecting each pixel's alpha byte.
+  const auto alpha_lanes = hn::Eq(hn::And(hn::Iota(df8, 0), hn::Set(df8, uint8_t{3})),
+                                  hn::Set(df8, uint8_t{3}));
+
+  uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst);
+  size_t px = 0;
+  for (; px + vl / 4 <= count; px += vl / 4) {
+    for (size_t off = 0; off < vl; off += sub) {
+      const auto s8 = hn::LoadU(df8, src_bytes + off);
+      const auto d8c = hn::LoadU(df8, dst + px * 4 + off);
+      const auto sa8 = BroadcastLaneByte(df8, s8, 3);
+      const auto da8 = BroadcastLaneByte(df8, d8c, 3);
+      const auto sf = hn::Div(
+          hn::ConvertTo(df32, hn::PromoteTo(du32, s8)), kInv255);
+      const auto df = hn::Div(
+          hn::ConvertTo(df32, hn::PromoteTo(du32, d8c)), kInv255);
+      const auto saf = hn::Div(
+          hn::ConvertTo(df32, hn::PromoteTo(du32, sa8)), kInv255);
+      const auto daf = hn::Div(
+          hn::ConvertTo(df32, hn::PromoteTo(du32, da8)), kInv255);
+
+      const auto rf = AdvancedComponent<MODE>(sf, saf, df, daf);
+      auto af = hn::Add(saf, hn::Mul(hn::Sub(kOne, saf), daf));
+      if constexpr (MODE == BlendMode::kSoftLight) {
+        af = hn::IfThenElse(hn::Eq(daf, hn::Zero(df32)), saf, af);
+      }
+
+      const auto quantize = [&](const hn::Vec<decltype(df32)> v) {
+        const auto clamped = hn::Min(kOne, hn::Max(hn::Zero(df32), v));
+        return hn::ConvertTo(du32, hn::Add(hn::Mul(clamped, k255f), kHalf));
+      };
+      const auto qc = quantize(rf);
+      const auto qa = quantize(af);
+      const auto out8 =
+          hn::IfThenElse(alpha_lanes, hn::TruncateTo(df8, qa),
+                         hn::TruncateTo(df8, qc));
+      hn::StoreU(out8, df8, dst + px * 4 + off);
+    }
+  }
+  for (; px < count; px++) {
+    dst32[px] = PMColorSwapRB(
+        PorterDuffBlend(src_pm, PMColorSwapRB(dst32[px]), MODE));
+  }
+}
+
+// The four HSL modes mix channels (luminance / saturation across rgb), which
+// the interleaved lane layout cannot express cheaply; they run the scalar
+// reference per pixel behind the same kernel-table interface.
+template <BlendMode MODE>
+static void HSLRunKernelT(uint8_t* HWY_RESTRICT dst, size_t count,
+                          uint32_t src_pm) {
+  uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst);
+  for (size_t i = 0; i < count; i++) {
+    dst32[i] =
+        PMColorSwapRB(PorterDuffBlend(src_pm, PMColorSwapRB(dst32[i]), MODE));
+  }
+}
+
+void SolidRunOverlayKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                           uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kOverlay>(dst, count, src_pm);
+}
+
+void SolidRunDarkenKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                          uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kDarken>(dst, count, src_pm);
+}
+
+void SolidRunLightenKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                           uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kLighten>(dst, count, src_pm);
+}
+
+void SolidRunColorDodgeKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                              uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kColorDodge>(dst, count, src_pm);
+}
+
+void SolidRunColorBurnKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                             uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kColorBurn>(dst, count, src_pm);
+}
+
+void SolidRunHardLightKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                             uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kHardLight>(dst, count, src_pm);
+}
+
+void SolidRunSoftLightKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                             uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kSoftLight>(dst, count, src_pm);
+}
+
+void SolidRunDifferenceKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                              uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kDifference>(dst, count, src_pm);
+}
+
+void SolidRunExclusionKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                             uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kExclusion>(dst, count, src_pm);
+}
+
+void SolidRunMultiplyKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                           uint32_t src_pm) {
+  AdvancedRunKernelT<BlendMode::kMultiply>(dst, count, src_pm);
+}
+
+void SolidRunHueKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                       uint32_t src_pm) {
+  HSLRunKernelT<BlendMode::kHue>(dst, count, src_pm);
+}
+
+void SolidRunSaturationKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                              uint32_t src_pm) {
+  HSLRunKernelT<BlendMode::kSaturation>(dst, count, src_pm);
+}
+
+void SolidRunColorKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                         uint32_t src_pm) {
+  HSLRunKernelT<BlendMode::kColor>(dst, count, src_pm);
+}
+
+void SolidRunLuminosityKernel(uint8_t* HWY_RESTRICT dst, size_t count,
+                              uint32_t src_pm) {
+  HSLRunKernelT<BlendMode::kLuminosity>(dst, count, src_pm);
+}
+
+// ---------------------------------------------------------------------------
 // Gradient fetch + blend kernels
 // ---------------------------------------------------------------------------
 
