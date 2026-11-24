@@ -333,6 +333,34 @@ static void BM_SWDrawImageScaledLinear(benchmark::State& state) {
 }
 BENCHMARK(BM_SWDrawImageScaledLinear)->Unit(benchmark::kMicrosecond);
 
+#ifdef SKITY_SW_ACCEL
+// Same scaled draw with the SIMD fetch/blend kernels disabled: the legacy
+// scalar sampler + per-pixel blend runs in the same binary. Compare against
+// BM_SWDrawImageScaledLinear for the accelerator's end-to-end effect.
+static void BM_SWDrawImageScaledLinearLegacy(benchmark::State& state) {
+  skity::Bitmap bitmap1(1000, 800, skity::AlphaType::kPremul_AlphaType);
+  auto canvas1 = skity::Canvas::MakeSoftwareCanvas(&bitmap1);
+
+  skity::Paint paint;
+  paint.SetColor(skity::Color_WHITE);
+  canvas1->DrawPaint(paint);
+  skity::example::basic::draw_canvas(canvas1.get());
+
+  skity::Bitmap bitmap2(500, 400, skity::AlphaType::kPremul_AlphaType);
+  auto canvas2 = skity::Canvas::MakeSoftwareCanvas(&bitmap2);
+  std::shared_ptr<skity::Image> image =
+      skity::Image::MakeImage(bitmap1.GetPixmap());
+  skity::SamplingOptions options{skity::FilterMode::kLinear,
+                                 skity::MipmapMode::kNone};
+
+  AccelToggle toggle(false);
+  for (auto _ : state) {
+    canvas2->DrawImage(image, skity::Rect::MakeWH(500.f, 400.f), options);
+  }
+}
+BENCHMARK(BM_SWDrawImageScaledLinearLegacy)->Unit(benchmark::kMicrosecond);
+#endif
+
 // Per-draw overhead: ten thousand small shapes stress the fixed cost of one
 // draw call (state stack, path conversion, rasterizer setup, brush
 // construction, span materialization) rather than pixel throughput.
