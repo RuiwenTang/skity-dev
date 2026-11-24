@@ -8,17 +8,16 @@
 
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "src/render/sw/accel/sw_accel_kernels.cc"
+#include "src/render/sw/accel/sw_accel.hpp"
+
 #include <hwy/foreach_target.h>
 
-#include <atomic>
 #include <cmath>
-
 #include <cstring>
 #include <mutex>
 
 #include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
-#include "src/render/sw/accel/sw_accel.hpp"
 #include "src/render/sw/accel/sw_accel_kernels.cc"
 
 namespace skity {
@@ -219,8 +218,7 @@ uint32_t ReferenceGradientColor(const GradientParams& p, float t) {
 
   // Color4fToColor: truncating cast of clamp(v * 255, 0, 255).
   const auto to_u8 = [](float v) {
-    return static_cast<uint32_t>(
-        std::min(255.f, std::max(0.f, v * 255.f)));
+    return static_cast<uint32_t>(std::min(255.f, std::max(0.f, v * 255.f)));
   };
   uint32_t ch[4] = {to_u8(rgba[0]), to_u8(rgba[1]), to_u8(rgba[2]),
                     to_u8(rgba[3])};
@@ -247,7 +245,6 @@ float ReferenceGradientT(const GradientParams& p, int32_t x, int32_t y) {
 
 std::once_flag g_validate_once;
 bool g_available = false;
-std::atomic<bool> g_runtime_enabled{true};
 
 void ValidateGradients();
 
@@ -332,20 +329,19 @@ void ValidateGradients() {
   // runs on a zeroed destination, where its output is exactly the fetched
   // word. Tolerance covers the LUT interpolation (about 2 per channel);
   // the fuse must not trip on rounding.
-  const float colors4[16] = {0.05f, 0.62f, 0.91f, 1.f,  0.80f, 0.15f,
-                             0.30f, 1.f,  0.33f, 0.90f, 0.12f, 0.60f,
+  const float colors4[16] = {0.05f, 0.62f, 0.91f, 1.f,   0.80f, 0.15f,
+                             0.30f, 1.f,   0.33f, 0.90f, 0.12f, 0.60f,
                              0.95f, 0.05f, 0.55f, 1.f};
   const float seg4s[3] = {0.20f, 0.55f, 0.75f};
   const float seg4e[3] = {0.55f, 0.75f, 0.85f};
-  const float colors3[12] = {0.9f, 0.1f, 0.1f, 0.4f, 0.1f, 0.9f,
+  const float colors3[12] = {0.9f, 0.1f,  0.1f, 0.4f, 0.1f, 0.9f,
                              0.1f, 0.85f, 0.1f, 0.1f, 0.9f, 1.f};
   const float seg3s[2] = {0.f, 0.5f};
   const float seg3e[2] = {0.5f, 1.f};
-  const int32_t tiles[] = {
-      static_cast<int32_t>(TileMode::kClamp),
-      static_cast<int32_t>(TileMode::kRepeat),
-      static_cast<int32_t>(TileMode::kMirror),
-      static_cast<int32_t>(TileMode::kDecal)};
+  const int32_t tiles[] = {static_cast<int32_t>(TileMode::kClamp),
+                           static_cast<int32_t>(TileMode::kRepeat),
+                           static_cast<int32_t>(TileMode::kMirror),
+                           static_cast<int32_t>(TileMode::kDecal)};
   for (int32_t tile : tiles) {
     GradientParams lin{};
     lin.type = 0;
@@ -421,9 +417,8 @@ void ValidateGradients() {
               expect = ch[0] | (ch[1] << 8) | (ch[2] << 16) | (ch[3] << 24);
             }
             for (int shift = 0; shift < 32; shift += 8) {
-              const int32_t d =
-                  static_cast<int32_t>((out[i] >> shift) & 0xff) -
-                  static_cast<int32_t>((expect >> shift) & 0xff);
+              const int32_t d = static_cast<int32_t>((out[i] >> shift) & 0xff) -
+                                static_cast<int32_t>((expect >> shift) & 0xff);
               if ((d < 0 ? -d : d) > 4) {
                 return;
               }
@@ -455,16 +450,12 @@ bool SupportsSolidMode(BlendMode mode) {
   return mode <= BlendMode::kLastMode;
 }
 
-void SetEnabled(bool enabled) {
-  g_runtime_enabled.store(enabled, std::memory_order_relaxed);
-}
-
-bool IsEnabled() { return g_runtime_enabled.load(std::memory_order_relaxed); }
-
 bool FillSolidSpans(BlendMode mode, uint32_t src_pm, uint8_t* dst_base,
                     size_t row_bytes, int32_t width, int32_t height,
                     const Span* spans, size_t span_count) {
-  if (!IsEnabled() || !Available()) {
+  // Callers gate on IsEnabled() (the runtime switch lives in the skity
+  // target, not this archive); only the Validate fuse is checked here.
+  if (!Available()) {
     return false;
   }
   RunKernelFn kernel = SelectRunKernel(mode);
@@ -516,8 +507,8 @@ bool BuildGradientLUT(const GradientParams& params, uint32_t* lut) {
     // snap band (anything closer to 1 snaps back to exactly 1 and wraps).
     // Pixels whose t lands on 1 read this left limit instead of legacy's
     // wrapped colors[0].
-    const float t = i == 511 ? 1.0f - 2.f / (1 << 12)
-                             : static_cast<float>(i) / 511.f;
+    const float t =
+        i == 511 ? 1.0f - 2.f / (1 << 12) : static_cast<float>(i) / 511.f;
     lut[i] = ReferenceGradientColor(params, t);
   }
   return true;
@@ -572,7 +563,8 @@ bool StopTableEqual(const GradientLUTCacheSlot& slot, const GradientParams& p) {
   return slot.tile_mode == p.tile_mode && slot.use_offsets == p.use_offsets &&
          slot.first_offset == p.first_offset &&
          slot.color_count == p.color_count && slot.seg_start.size() == segs &&
-         memcmp(slot.seg_start.data(), p.seg_start, segs * sizeof(float)) == 0 &&
+         memcmp(slot.seg_start.data(), p.seg_start, segs * sizeof(float)) ==
+             0 &&
          memcmp(slot.seg_end.data(), p.seg_end, segs * sizeof(float)) == 0 &&
          memcmp(slot.colors.data(), p.colors,
                 static_cast<size_t>(p.color_count) * 4 * sizeof(float)) == 0;
@@ -590,7 +582,8 @@ const uint32_t* AcquireGradientLUT(const GradientParams& params) {
 
   const uint64_t hash = StopTableHash(params);
   for (GradientLUTCacheSlot& slot : slots) {
-    if (slot.lut.empty() || slot.hash != hash || !StopTableEqual(slot, params)) {
+    if (slot.lut.empty() || slot.hash != hash ||
+        !StopTableEqual(slot, params)) {
       continue;
     }
     return slot.lut.data();
@@ -605,9 +598,9 @@ const uint32_t* AcquireGradientLUT(const GradientParams& params) {
   const size_t segs = static_cast<size_t>(params.color_count - 1);
   slot.seg_start.assign(params.seg_start, params.seg_start + segs);
   slot.seg_end.assign(params.seg_end, params.seg_end + segs);
-  slot.colors.assign(params.colors,
-                     params.colors +
-                         static_cast<size_t>(params.color_count) * 4);
+  slot.colors.assign(
+      params.colors,
+      params.colors + static_cast<size_t>(params.color_count) * 4);
   slot.lut.resize(512);
   if (!BuildGradientLUT(params, slot.lut.data())) {
     slot.lut.clear();
@@ -619,7 +612,8 @@ const uint32_t* AcquireGradientLUT(const GradientParams& params) {
 bool FillGradientSpans(const GradientParams& params, BlendMode mode,
                        uint8_t* dst_base, size_t row_bytes, int32_t width,
                        int32_t height, const Span* spans, size_t span_count) {
-  if (!IsEnabled() || !Available()) {
+  // Same contract as FillSolidSpans: the caller checked IsEnabled().
+  if (!Available()) {
     return false;
   }
   GradientKernelFn kernel = SelectGradientKernel(params, mode);

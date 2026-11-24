@@ -46,10 +46,14 @@ bool Validate();
 bool Available();
 
 // Dev/testing facility: process-global runtime switch for the accelerated
-// path, on by default. When off, FillSolidSpans fails and SWCanvas falls
-// back to the legacy brush within the same binary - for A/B comparisons of
-// rendering results and performance. Compile-time exclusion
-// (SKITY_SW_ACCEL=OFF) remains the packaging knob.
+// path, on by default. Defined in the skity target itself (one mirror per
+// process), not in the skity_sw_accel archive: test and benchmark
+// executables link the archive statically, and a switch defined there would
+// shadow the shared library's copy, making A/B arms toggle a state the
+// renderer never read. When off, the brush layer falls back to the legacy
+// scalar path within the same binary - for A/B comparisons of rendering
+// results and performance. Compile-time exclusion (SKITY_SW_ACCEL=OFF)
+// remains the packaging knob.
 SW_ACCEL_API void SetEnabled(bool enabled);
 SW_ACCEL_API bool IsEnabled();
 
@@ -61,9 +65,11 @@ SW_ACCEL_API bool IsEnabled();
 // Spans are clamped to [0, width) x [0, height) like SWSpanBrush::Brush.
 //
 // Supported modes today: every Porter-Duff coeff mode (kClear through
-// kScreen, including the kDst no-op). Returns false (and does nothing) when
-// the mode is unsupported or the accelerator is unavailable, in which case
-// the caller must use the legacy brush path.
+// kScreen, including the kDst no-op). The caller must check IsEnabled()
+// first (the kernels do not read the runtime switch; the state lives in the
+// skity target). Returns false (and does nothing) when the mode is
+// unsupported or the accelerator is unavailable (Validate fuse), in which
+// case the caller must use the legacy brush path.
 bool FillSolidSpans(BlendMode mode, uint32_t src_pm, uint8_t* dst_base,
                     size_t row_bytes, int32_t width, int32_t height,
                     const Span* spans, size_t span_count);
@@ -132,9 +138,11 @@ const uint32_t* AcquireGradientLUT(const GradientParams& params);
 // (premul ColorType::kRGBA; spans clamped to the surface). Coverage is
 // folded into each fetched color with AlphaMulQ, like the legacy brush.
 //
-// Supported today: linear and radial gradients (kSrc and kSrcOver). Returns
-// false (without touching pixels) when the gradient type or blend mode is
-// unsupported or the accelerator is unavailable/disabled.
+// Supported today: linear and radial gradients (kSrc and kSrcOver). Like
+// FillSolidSpans, the caller must check IsEnabled() first. Returns false
+// (without touching pixels) when the gradient type or blend mode is
+// unsupported or the accelerator is unavailable (Validate fuse), in which
+// case the caller must use the legacy brush path.
 bool FillGradientSpans(const GradientParams& params, BlendMode mode,
                        uint8_t* dst_base, size_t row_bytes, int32_t width,
                        int32_t height, const Span* spans, size_t span_count);

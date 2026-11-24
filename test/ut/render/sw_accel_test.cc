@@ -9,12 +9,11 @@
 #include <stdint.h>
 
 #include <cmath>
-#include <vector>
-
 #include <skity/effect/shader.hpp>
 #include <skity/graphic/bitmap.hpp>
 #include <skity/graphic/paint.hpp>
 #include <skity/render/canvas.hpp>
+#include <vector>
 
 #include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
@@ -55,8 +54,9 @@ uint32_t ReferenceBlend(BlendMode mode, uint32_t src_pm, uint32_t dst_mem,
 constexpr int32_t kWidth = 64;
 constexpr int32_t kHeight = 5;
 
-void FillReference(std::vector<uint32_t>& bitmap, const std::vector<Span>& spans,
-                   BlendMode mode, uint32_t src_pm) {
+void FillReference(std::vector<uint32_t>& bitmap,
+                   const std::vector<Span>& spans, BlendMode mode,
+                   uint32_t src_pm) {
   for (const Span& span : spans) {
     int32_t x = span.x;
     int32_t y = span.y;
@@ -71,13 +71,11 @@ void FillReference(std::vector<uint32_t>& bitmap, const std::vector<Span>& spans
     if (x + len > kWidth) {
       len = kWidth - x;
     }
-    int32_t cover = span.cover < 0     ? 0
-                    : span.cover > 255 ? 255
-                                       : span.cover;
+    int32_t cover = span.cover < 0 ? 0 : span.cover > 255 ? 255 : span.cover;
     for (int32_t i = 0; i < len; i++) {
       size_t idx = static_cast<size_t>(y) * kWidth + x + i;
-      bitmap[idx] =
-          ReferenceBlend(mode, src_pm, bitmap[idx], static_cast<uint8_t>(cover));
+      bitmap[idx] = ReferenceBlend(mode, src_pm, bitmap[idx],
+                                   static_cast<uint8_t>(cover));
     }
   }
 }
@@ -88,7 +86,8 @@ std::vector<Span> RandomSpans(uint32_t& state) {
     int32_t x = static_cast<int32_t>(NextRandom(state) % 20) - 4;
     while (x < kWidth) {
       int32_t len = static_cast<int32_t>(NextRandom(state) % 30) + 1;
-      spans.push_back(Span{x, y, len, static_cast<int32_t>(NextRandom(state) % 256)});
+      spans.push_back(
+          Span{x, y, len, static_cast<int32_t>(NextRandom(state) % 256)});
       x += len + static_cast<int32_t>(NextRandom(state) % 4) - 1;
     }
   }
@@ -124,12 +123,11 @@ TEST(SWAccel, SolidSpansMatchScalarReference) {
       actual = expect;
 
       std::vector<Span> spans = RandomSpans(state);
-      uint32_t src_pm = round % 3 == 0
-                            ? edge_colors[round % 3]
-                            : RandomColor(state);
+      uint32_t src_pm =
+          round % 3 == 0 ? edge_colors[round % 3] : RandomColor(state);
       ASSERT_TRUE(FillSolidSpans(
-          mode, src_pm, reinterpret_cast<uint8_t*>(actual.data()),
-          kWidth * 4, kWidth, kHeight, spans.data(), spans.size()));
+          mode, src_pm, reinterpret_cast<uint8_t*>(actual.data()), kWidth * 4,
+          kWidth, kHeight, spans.data(), spans.size()));
       FillReference(expect, spans, mode, src_pm);
       if (mode == BlendMode::kSoftLight) {
         for (size_t i = 0; i < expect.size(); i++) {
@@ -153,7 +151,9 @@ TEST(SWAccel, SolidSpansClampOutOfBounds) {
   std::vector<uint32_t> expect = actual;
   // Out of bounds on every side; only the in-bounds slice may change.
   std::vector<Span> spans = {
-      Span{-10, 2, 30, 255}, Span{60, 2, 100, 255}, Span{0, -3, 10, 255},
+      Span{-10, 2, 30, 255},
+      Span{60, 2, 100, 255},
+      Span{0, -3, 10, 255},
       Span{0, kHeight + 2, 10, 255},
   };
   ASSERT_TRUE(FillSolidSpans(BlendMode::kSrcOver, 0xffffffffu,
@@ -181,13 +181,16 @@ TEST(SWAccel, RuntimeSwitchTogglesFallback) {
                              reinterpret_cast<uint8_t*>(bitmap.data()),
                              kWidth * 4, kWidth, 1, &span, 1));
 
-  // Disabled at runtime: the entry point fails without touching pixels and
-  // SWCanvas falls back to the legacy brush.
+  // Disabled at runtime: the brush layer checks IsEnabled() and falls back
+  // to the legacy path; the raw kernel entry points still run the dispatched
+  // SIMD target (they only honor the Validate fuse). The renderer-level
+  // effect of the toggle is covered end to end by
+  // GradientCanvasAccelMatchesLegacy, whose arms must differ.
   skity::sw_accel::SetEnabled(false);
   EXPECT_FALSE(skity::sw_accel::IsEnabled());
-  EXPECT_FALSE(FillSolidSpans(BlendMode::kSrc, 0xff00ff00u,
-                              reinterpret_cast<uint8_t*>(bitmap.data()),
-                              kWidth * 4, kWidth, 1, &span, 1));
+  EXPECT_TRUE(FillSolidSpans(BlendMode::kSrc, 0xff00ff00u,
+                             reinterpret_cast<uint8_t*>(bitmap.data()),
+                             kWidth * 4, kWidth, 1, &span, 1));
 
   // Restore for the other tests.
   skity::sw_accel::SetEnabled(true);
@@ -281,8 +284,8 @@ uint32_t GradientWordRef(const TestGradient& g, int32_t x, int32_t y,
   const float rgba[4] = {c.r, c.g, c.b, c.a};
   uint32_t ch[4];
   for (int i = 0; i < 4; i++) {
-    ch[i] = static_cast<uint32_t>(
-        std::min(255.f, std::max(0.f, rgba[i] * 255.f)));
+    ch[i] =
+        static_cast<uint32_t>(std::min(255.f, std::max(0.f, rgba[i] * 255.f)));
   }
   if (ch[3] != 255) {
     for (int i = 0; i < 3; i++) {
@@ -351,10 +354,9 @@ TestGradient RandomGradient(uint32_t& state) {
   // Keep one entry big enough that t sweeps well past [0, 1] over a row.
   g.m[NextRandom(state) % (g.type == 1 ? 3 : 2)] +=
       (static_cast<int32_t>(NextRandom(state) % 4001) + 1000) / 20000.f;
-  const skity::TileMode tiles[] = {skity::TileMode::kClamp,
-                                   skity::TileMode::kRepeat,
-                                   skity::TileMode::kMirror,
-                                   skity::TileMode::kDecal};
+  const skity::TileMode tiles[] = {
+      skity::TileMode::kClamp, skity::TileMode::kRepeat,
+      skity::TileMode::kMirror, skity::TileMode::kDecal};
   g.tile = tiles[NextRandom(state) % 4];
   const int32_t count = 2 + static_cast<int32_t>(NextRandom(state) % 5);
   const bool has_off = NextRandom(state) % 2 == 0;
@@ -419,9 +421,8 @@ TEST(SWAccel, GradientFetchMatchesScalarReference) {
         continue;
       }
       for (int32_t i = 0; i < span.len && span.x + i < kW; i++) {
-        expect[static_cast<size_t>(span.y) * kW + span.x + i] =
-            GradientWordRef(g, span.x + i, span.y,
-                            static_cast<uint8_t>(span.cover & 0xff));
+        expect[static_cast<size_t>(span.y) * kW + span.x + i] = GradientWordRef(
+            g, span.x + i, span.y, static_cast<uint8_t>(span.cover & 0xff));
       }
     }
     for (size_t i = 0; i < expect.size(); i++) {
@@ -449,9 +450,8 @@ TEST(SWAccel, GradientFetchMatchesScalarReference) {
         continue;
       }
       for (int shift = 0; shift < 32; shift += 8) {
-        const int32_t d =
-            static_cast<int32_t>((expect[i] >> shift) & 0xff) -
-            static_cast<int32_t>((bitmap[i] >> shift) & 0xff);
+        const int32_t d = static_cast<int32_t>((expect[i] >> shift) & 0xff) -
+                          static_cast<int32_t>((bitmap[i] >> shift) & 0xff);
         ASSERT_LE(d < 0 ? -d : d, 4) << "round " << round << " pixel " << i;
       }
     }
@@ -504,7 +504,8 @@ void DrawGradientScene(skity::Canvas* canvas) {
       skity::Vec4{0.f, 0.f, 0.f, 0.5f},
   };
   skity::Point center{60.f, 55.f, 0.f, 1.f};
-  paint.SetShader(skity::Shader::MakeRadial(center, 30.f, rad_colors, nullptr, 2));
+  paint.SetShader(
+      skity::Shader::MakeRadial(center, 30.f, rad_colors, nullptr, 2));
   canvas->DrawRect(skity::Rect::MakeXYWH(30, 30, 60, 40), paint);
 
   // Sweep: not accelerated; both arms run the legacy brush.
@@ -520,10 +521,15 @@ void DrawGradientScene(skity::Canvas* canvas) {
 }  // namespace
 
 // End-to-end: the same scene drawn with the accelerator off and on must
-// match within the composed tolerances: the gradient LUT interpolation
-// contributes about 2 per channel; on arm the legacy blend additionally
-// runs through NEON helpers that differ from the scalar formula by at most
-// 1 (a pre-existing skity inconsistency). Hence <= 3.
+// match within the composed tolerance. The off arm renders the gradients
+// through the scalar fallback brushes, so the only remaining difference
+// source is the LUT interpolation, about 2 per channel; horizontal blending
+// is scalar on every architecture (the legacy NEON run blender, which
+// differed from the scalar formula by +/-1, was removed with M2-0).
+// The test also asserts the switch actually reaches the renderer: if the
+// toggle were again confined to a static mirror that the renderer never
+// reads (the M1 defect), both arms would be pixel-identical and the
+// differing-pixel assertion below would fail.
 // Cache semantics of AcquireGradientLUT: the key covers the stop table and
 // tile mode but not the transform (animated gradients hit), and round-robin
 // eviction under more gradients than cache slots never returns a mismatched
@@ -628,27 +634,37 @@ TEST(SWAccel, GradientLUTCacheKeysOnStopTableOnly) {
 TEST(SWAccel, GradientCanvasAccelMatchesLegacy) {
   constexpr int32_t kW = 96;
   constexpr int32_t kH = 72;
+  const uint32_t background = skity::ColorSetA(skity::Color_GRAY, 255);
 
   skity::sw_accel::SetEnabled(false);
   skity::Bitmap legacy(kW, kH, skity::AlphaType::kPremul_AlphaType);
   auto legacy_canvas = skity::Canvas::MakeSoftwareCanvas(&legacy);
-  legacy_canvas->DrawColor(skity::ColorSetA(skity::Color_GRAY, 255));
+  legacy_canvas->DrawColor(background);
   DrawGradientScene(legacy_canvas.get());
   skity::sw_accel::SetEnabled(true);
 
   skity::Bitmap accel(kW, kH, skity::AlphaType::kPremul_AlphaType);
   auto accel_canvas = skity::Canvas::MakeSoftwareCanvas(&accel);
-  accel_canvas->DrawColor(skity::ColorSetA(skity::Color_GRAY, 255));
+  accel_canvas->DrawColor(background);
   DrawGradientScene(accel_canvas.get());
 
   const uint32_t* lp = reinterpret_cast<const uint32_t*>(legacy.GetPixelAddr());
   const uint32_t* ap = reinterpret_cast<const uint32_t*>(accel.GetPixelAddr());
   int64_t exact = 0;
+  int64_t differing = 0;
+  int64_t legacy_gradient_pixels = 0;
   for (size_t i = 0; i < static_cast<size_t>(kW) * kH; i++) {
+    // The off arm must paint the gradients through the scalar fallback.
+    // A broken fallback (e.g. falling into the transparent unsupported-type
+    // base) would leave the flat gray background here.
+    if (lp[i] != background) {
+      legacy_gradient_pixels++;
+    }
     if (lp[i] == ap[i]) {
       exact++;
       continue;
     }
+    differing++;
     for (int shift = 0; shift < 32; shift += 8) {
       const int32_t d = static_cast<int32_t>((lp[i] >> shift) & 0xff) -
                         static_cast<int32_t>((ap[i] >> shift) & 0xff);
@@ -656,8 +672,16 @@ TEST(SWAccel, GradientCanvasAccelMatchesLegacy) {
     }
   }
   // The sweep block falls back identically on both arms; the rest should be
-  // near-identical (differences are confined to LUT and blend rounding).
+  // near-identical (differences are confined to LUT rounding).
   EXPECT_GT(exact * 100 / (static_cast<int64_t>(kW) * kH), 80);
+  // Non-no-op guard for the runtime switch: the LUT fetch and the scalar
+  // chain round differently on real gradient interiors, so the arms must
+  // differ somewhere. Pixel-identical arms mean the toggle never reached
+  // the renderer (the two-mirror defect this test exists to catch).
+  EXPECT_GT(differing, 0) << "accel and legacy arms are pixel-identical; "
+                             "the runtime switch did not reach the renderer";
+  EXPECT_GT(legacy_gradient_pixels, static_cast<int64_t>(kW) * kH / 4)
+      << "the scalar gradient fallback did not paint";
 }
 
 #endif  // SKITY_SW_ACCEL

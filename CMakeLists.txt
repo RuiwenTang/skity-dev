@@ -238,6 +238,11 @@ if(${SKITY_SW_ACCEL})
       target_compile_definitions(skity_sw_accel PRIVATE HWY_DISABLED_TARGETS=512)
     endif()
     target_link_libraries(skity PRIVATE skity_sw_accel)
+    # The runtime switch must live in the skity target, not the archive (see
+    # sw_accel_switch.cc): skity_unit_test / skity_micro_bench link the
+    # archive statically and would otherwise own a second, divergent copy of
+    # the state their A/B arms toggle.
+    target_sources(skity PRIVATE src/render/sw/accel/sw_accel_switch.cc)
     target_compile_definitions(skity PUBLIC -DSKITY_SW_ACCEL=1)
   else()
     message(STATUS

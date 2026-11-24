@@ -52,7 +52,8 @@ constexpr ColorType ToColorType(BitmapFormat bitmap_format) {
 static bool TryAccelerateSolidFill(std::vector<Span> const& spans,
                                    const Paint& paint, bool stroke,
                                    Bitmap* bitmap) {
-  if (spans.empty() || paint.GetShader() || paint.GetColorFilter() ||
+  if (!sw_accel::IsEnabled() || spans.empty() || paint.GetShader() ||
+      paint.GetColorFilter() ||
       !sw_accel::SupportsSolidMode(paint.GetBlendMode()) ||
       bitmap->GetAlphaType() != AlphaType::kPremul_AlphaType ||
       bitmap->GetColorType() != ColorType::kRGBA) {
@@ -64,8 +65,8 @@ static bool TryAccelerateSolidFill(std::vector<Span> const& spans,
                          : paint.GetFillColor(bitmap_space);
   uint32_t src_pm = ColorToPMColor(Color4fToColor(color));
   return sw_accel::FillSolidSpans(
-      paint.GetBlendMode(), src_pm, bitmap->GetPixelAddr(),
-      bitmap->RowBytes(), static_cast<int32_t>(bitmap->Width()),
+      paint.GetBlendMode(), src_pm, bitmap->GetPixelAddr(), bitmap->RowBytes(),
+      static_cast<int32_t>(bitmap->Width()),
       static_cast<int32_t>(bitmap->Height()), spans.data(), spans.size());
 }
 #endif

@@ -550,7 +550,20 @@ class AcceleratedGradientColorBrush : public GradientColorBrush {
                                 Shader::GradientType type,
                                 const Matrix& device_to_local)
       : GradientColorBrush(spans, bitmap, color_filter, blend, info, type),
-        device_to_local_(device_to_local) {}
+        device_to_local_(device_to_local) {
+    // The scalar twin that renders when the accelerator is disabled, trips
+    // its Validate fuse, or rejects this configuration at draw time. This
+    // factory only creates the accelerated brush for linear/radial
+    // gradients, so the fallback is always one of the real legacy brushes -
+    // never the transparent unsupported-type base.
+    if (type == Shader::GradientType::kRadial) {
+      fallback_ = std::make_unique<RadialGradientColorBrush>(
+          spans, bitmap, color_filter, blend, info, type, device_to_local);
+    } else {
+      fallback_ = std::make_unique<LinearGradientColorBrush>(
+          spans, bitmap, color_filter, blend, info, type, device_to_local);
+    }
+  }
 
   ~AcceleratedGradientColorBrush() override = default;
 
@@ -574,7 +587,7 @@ class AcceleratedGradientColorBrush : public GradientColorBrush {
       }
       // Disabled or unavailable at draw time; nothing has been written yet.
     }
-    SWSpanBrush::Brush();
+    fallback_->Brush();
   }
 
  private:
@@ -586,7 +599,8 @@ class AcceleratedGradientColorBrush : public GradientColorBrush {
     const int32_t count = static_cast<int32_t>(info_.colors.size());
     // A short offsets table would read out of bounds below (the legacy scan
     // has the same assumption); keep such gradients on the scalar path.
-    if (count < 2 || (!offsets.empty() && offsets.size() < info_.colors.size())) {
+    if (count < 2 ||
+        (!offsets.empty() && offsets.size() < info_.colors.size())) {
       return false;
     }
     const Matrix m = PointsToUnit(info_, type_) * device_to_local_;
@@ -643,6 +657,7 @@ class AcceleratedGradientColorBrush : public GradientColorBrush {
   sw_accel::GradientParams params_ = {};
   std::vector<float> seg_start_;
   std::vector<float> seg_end_;
+  std::unique_ptr<SWSpanBrush> fallback_;
   bool params_built_ = false;
   bool use_accel_ = false;
 };
