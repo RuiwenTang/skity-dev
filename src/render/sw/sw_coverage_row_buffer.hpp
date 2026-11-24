@@ -17,12 +17,17 @@ namespace skity {
 //
 // - AddDirectRun: O(1) append of a constant-coverage run. Used for full-alpha
 //   sub-scanline emission (opaque interiors, 1-2px edge pixels, AAA edge
-//   rows). These runs never overlap by construction of well-formed fills,
-//   so they must not pay a per-pixel cost; a 900px interior run costs the
-//   same as a 1px run.
+//   rows). These runs never overlap other direct runs by construction of
+//   well-formed fills, so they must not pay a per-pixel cost; a 900px
+//   interior run costs the same as a 1px run. A run overlapping the dense
+//   dirty extent is the one exception: it folds into the dense accumulator
+//   (O(len), rare boundary rows only) so every pixel is emitted - and thus
+//   blended - exactly once.
 // - AddRun / AddAlphas: dense u16 accumulation into the row buffer. Used for
 //   partial sub-scanlines (1/4, 1/2 pixel steps) where multiple
-//   contributions to the same pixel must sum up and clamp once at 255.
+//   contributions to the same pixel must sum up and clamp once at 255. Dense
+//   coverage arriving on top of pending direct runs folds them into the
+//   accumulator for the same reason.
 //
 // On row change (or TakeSpans) the pending row is coalesced into spans in
 // ascending x order by merging the direct runs with the dense dirty extent.
@@ -68,10 +73,19 @@ class CoverageRowBuffer {
   void FlushRow();
   // Emits a direct run, merging into the previous span when adjacent.
   void EmitSpan(int x, int y, int len, uint8_t cover);
+  // Adds every pending direct run into the dense accumulator (summing with
+  // the dense coverage, which the flush clamps once) and clears the run
+  // list. Used when direct runs and dense coverage overlap, so each pixel
+  // receives exactly one blended contribution.
+  void FoldDirectRunsIntoDense();
 
   std::vector<uint16_t> row_;
-  // Direct (non-accumulated) constant runs of the pending row.
+  // Direct (non-accumulated) constant runs of the pending row, plus their
+  // [min x, max end) extent used to detect overlaps at O(1) before falling
+  // back to the dense accumulator.
   std::vector<Span> direct_runs_;
+  int32_t direct_lo_ = 0;
+  int32_t direct_hi_ = 0;
   std::vector<Span> spans_;
   int32_t curr_y_ = SW_NaN32;
   int32_t left_;

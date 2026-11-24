@@ -164,8 +164,13 @@ static void blit_single_alpha(CoverageRowBuffer* buffer, int y, int x,
 
 static void blit_two_alphas(CoverageRowBuffer* buffer, int y, int x, Alpha a1,
                             Alpha a2, Alpha fullAlpha) {
-  a1 = scale_partial_alpha(a1, fullAlpha);
-  a2 = scale_partial_alpha(a2, fullAlpha);
+  // The raw a1/a2 are already expressed per sub-scanline slice by the
+  // caller's geometry, and the legacy accumulator received them unscaled on
+  // both paths (the direct path is unscaled too; scale_partial_alpha would
+  // be a no-op there). Scaling them for the accumulated path halved the
+  // coverage of diagonal stroke edges - the ClipPathDifference golden
+  // regression - so they pass through untouched, exactly like the legacy
+  // SpanBuilder sink.
   if (fullAlpha == 0xFF) {
     buffer->AddDirectRun(x, y, 1, a1);
     buffer->AddDirectRun(x + 1, y, 1, a2);
@@ -242,10 +247,9 @@ static void compute_alpha_below_line(Alpha* alphas, SWFixed l, SWFixed r,
   }
 }
 
-static void blit_aaa_trapezoid_row(CoverageRowBuffer* buffer, int y,
-                                   SWFixed ul, SWFixed ur, SWFixed ll,
-                                   SWFixed lr, SWFixed lDY, SWFixed rDY,
-                                   Alpha fullAlpha) {
+static void blit_aaa_trapezoid_row(CoverageRowBuffer* buffer, int y, SWFixed ul,
+                                   SWFixed ur, SWFixed ll, SWFixed lr,
+                                   SWFixed lDY, SWFixed rDY, Alpha fullAlpha) {
   int L = SWFixedFloorToInt(ul), R = SWFixedCeilToInt(lr);
   int len = R - L;
   if (len == 1) {
@@ -400,8 +404,8 @@ static void blit_trapezoid_row(CoverageRowBuffer* buffer, int y, SWFixed ul,
         Alpha a2 = partial_triangle_to_alpha(second, rDY);
         blit_two_alphas(buffer, y, joinRite >> 16, a1, a2, fullAlpha);
       } else {
-        blit_aaa_trapezoid_row(buffer, y, joinRite, ur, joinRite, lr,
-                               SW_MaxS32, rDY, fullAlpha);
+        blit_aaa_trapezoid_row(buffer, y, joinRite, ur, joinRite, lr, SW_MaxS32,
+                               rDY, fullAlpha);
       }
     }
   } else {
@@ -635,8 +639,8 @@ void SWRaster::RastePath(Path const& path, Matrix const& transform,
   left_bound = static_cast<uint32_t>(scan_bounds.Left()) << 16;
   right_bound = static_cast<uint32_t>(scan_bounds.Right()) << 16;
 
-  WalkEdges(&head, &tail, path.GetFillType(), &coverage_buffer, start_y,
-            stop_y, left_bound, right_bound);
+  WalkEdges(&head, &tail, path.GetFillType(), &coverage_buffer, start_y, stop_y,
+            left_bound, right_bound);
   spans_ = coverage_buffer.TakeSpans();
 }
 

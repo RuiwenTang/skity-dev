@@ -49,10 +49,9 @@ TEST(SWCoverageRowBuffer, ClampsCoverageAndMergesEqualRuns) {
   buffer.AddAlphas(10, 4, std::vector<uint8_t>{100, 100, 100, 100}.data(), 4);
 
   std::vector<Span> spans = buffer.TakeSpans();
-  ExpectSpanListsEqual(
-      Spans({Span{6, 4, 1, 200}, Span{7, 4, 1, 255}, Span{8, 4, 1, 200},
-             Span{10, 4, 4, 100}}),
-      spans);
+  ExpectSpanListsEqual(Spans({Span{6, 4, 1, 200}, Span{7, 4, 1, 255},
+                              Span{8, 4, 1, 200}, Span{10, 4, 4, 100}}),
+                       spans);
 }
 
 TEST(SWCoverageRowBuffer, FlushesRowsInOrderAndClearsDirtyExtent) {
@@ -63,8 +62,7 @@ TEST(SWCoverageRowBuffer, FlushesRowsInOrderAndClearsDirtyExtent) {
   buffer.AddRun(7, 6, 1, 90);
 
   std::vector<Span> spans = buffer.TakeSpans();
-  ExpectSpanListsEqual(Spans({Span{6, 5, 4, 255}, Span{7, 6, 1, 90}}),
-                       spans);
+  ExpectSpanListsEqual(Spans({Span{6, 5, 4, 255}, Span{7, 6, 1, 90}}), spans);
 }
 
 TEST(SWCoverageRowBuffer, ClipsOutOfRangePixels) {
@@ -95,9 +93,41 @@ TEST(SWCoverageRowBuffer, MergesDirectRunsWithDenseCoverage) {
   buffer.AddDirectRun(22, 5, 3, 255);
 
   std::vector<Span> spans = buffer.TakeSpans();
+  ExpectSpanListsEqual(Spans({Span{6, 5, 2, 64}, Span{8, 5, 4, 255},
+                              Span{12, 5, 2, 128}, Span{20, 5, 5, 255}}),
+                       spans);
+}
+
+TEST(SWCoverageRowBuffer, OverlappingDirectRunFoldsIntoDenseCoverage) {
+  // The walker can deliver a full-alpha direct run and dense sub-scanline
+  // coverage for the same pixel within one device row (several sub-scanline
+  // steps hit the same edge pixel through different blit paths). The flush
+  // must emit one span with the summed coverage: two overlapping spans would
+  // blend that pixel twice and darken the output.
+  CoverageRowBuffer buffer(kLeft, kWidth, kTop);
+  buffer.AddRun(7, 5, 2, 48);         // dense extent [7, 9)
+  buffer.AddDirectRun(7, 5, 1, 208);  // overlaps the dense extent -> folds
+
+  auto spans = buffer.TakeSpans();
+  ExpectSpanListsEqual(Spans({Span{7, 5, 1, 255}, Span{8, 5, 1, 48}}), spans);
+
+  // Same rule in the reverse order: dense coverage arriving on top of an
+  // already-appended direct run folds the run into the accumulator. The
+  // summed coverage quantizes per pixel (200 stays, 200+100 clamps to 255).
+  CoverageRowBuffer reverse(kLeft, kWidth, kTop);
+  reverse.AddDirectRun(7, 5, 2, 200);
+  reverse.AddRun(8, 5, 1, 100);
+  spans = reverse.TakeSpans();
+  ExpectSpanListsEqual(Spans({Span{7, 5, 1, 200}, Span{8, 5, 1, 255}}), spans);
+
+  // AddAlphas folds the same way.
+  CoverageRowBuffer with_alphas(kLeft, kWidth, kTop);
+  with_alphas.AddDirectRun(7, 5, 2, 200);
+  const uint8_t alphas[] = {100, 100};
+  with_alphas.AddAlphas(8, 5, alphas, 2);
+  spans = with_alphas.TakeSpans();
   ExpectSpanListsEqual(
-      Spans({Span{6, 5, 2, 64}, Span{8, 5, 4, 255}, Span{12, 5, 2, 128},
-             Span{20, 5, 5, 255}}),
+      Spans({Span{7, 5, 1, 200}, Span{8, 5, 1, 255}, Span{9, 5, 1, 100}}),
       spans);
 }
 

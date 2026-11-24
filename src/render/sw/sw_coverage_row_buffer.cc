@@ -29,10 +29,35 @@ void CoverageRowBuffer::AddDirectRun(int x, int y, int len, uint8_t alpha) {
     Span& last = direct_runs_.back();
     if (last.cover == alpha && last.x + last.len == x) {
       last.len += len;
+      direct_hi_ = std::max(direct_hi_, x + len);
       return;
     }
   }
+  // Blending the same pixel twice darkens the output (SrcOver is not
+  // idempotent), so any overlap must be summed into the dense accumulator
+  // before emission. Two sources exist: a direct run overlapping the dense
+  // dirty extent, and two direct runs overlapping each other (the walker can
+  // emit several full-alpha trapezoid pieces into one device row that share
+  // an edge pixel). The extent prechecks keep the common non-overlapping
+  // path - including the per-pixel AAA emission loop, which walks strictly
+  // left to right - at O(1).
+  if (max_x_ > min_x_ && x < left_ + max_x_ && x + len > left_ + min_x_) {
+    AddRun(x, y, len, alpha);
+    return;
+  }
+  if (!direct_runs_.empty() && x < direct_hi_ && x + len > direct_lo_) {
+    FoldDirectRunsIntoDense();
+    AddRun(x, y, len, alpha);
+    return;
+  }
   direct_runs_.push_back(Span{x, y, len, alpha});
+  if (direct_runs_.size() == 1) {
+    direct_lo_ = x;
+    direct_hi_ = x + len;
+  } else {
+    direct_lo_ = std::min(direct_lo_, x);
+    direct_hi_ = std::max(direct_hi_, x + len);
+  }
 }
 
 void CoverageRowBuffer::AddRun(int x, int y, int len, uint8_t alpha) {
@@ -42,10 +67,16 @@ void CoverageRowBuffer::AddRun(int x, int y, int len, uint8_t alpha) {
   if (y != curr_y_) {
     SwitchRow(y);
   }
-  int32_t begin = std::max<int32_t>(x, left_);
-  int32_t end = std::min<int32_t>(x + len, left_ + width_);
+  const int32_t begin = std::max<int32_t>(x, left_);
+  const int32_t end = std::min<int32_t>(x + len, left_ + width_);
   if (begin >= end) {
     return;
+  }
+  // Dense coverage arriving on top of already-appended direct runs folds
+  // them into the accumulator so the flush emits one span per pixel (see
+  // AddDirectRun).
+  if (!direct_runs_.empty() && begin < direct_hi_ && end > direct_lo_) {
+    FoldDirectRunsIntoDense();
   }
   for (int32_t i = begin; i < end; i++) {
     row_[i - left_] = static_cast<uint16_t>(row_[i - left_] + alpha);
@@ -62,18 +93,40 @@ void CoverageRowBuffer::AddAlphas(int x, int y, const uint8_t* alphas,
   if (y != curr_y_) {
     SwitchRow(y);
   }
-  int32_t begin = std::max<int32_t>(x, left_);
-  int32_t end = std::min<int32_t>(x + len, left_ + width_);
+  const int32_t begin = std::max<int32_t>(x, left_);
+  const int32_t end = std::min<int32_t>(x + len, left_ + width_);
+  if (begin >= end) {
+    return;
+  }
+  // Same direct-run fold as AddRun.
+  if (!direct_runs_.empty() && begin < direct_hi_ && end > direct_lo_) {
+    FoldDirectRunsIntoDense();
+  }
   for (int32_t i = begin; i < end; i++) {
     uint8_t alpha = alphas[i - x];
     if (alpha != 0) {
       row_[i - left_] = static_cast<uint16_t>(row_[i - left_] + alpha);
     }
   }
-  if (begin < end) {
-    min_x_ = std::min(min_x_, begin - left_);
-    max_x_ = std::max(max_x_, end - left_);
+  min_x_ = std::min(min_x_, begin - left_);
+  max_x_ = std::max(max_x_, end - left_);
+}
+
+void CoverageRowBuffer::FoldDirectRunsIntoDense() {
+  for (const Span& run : direct_runs_) {
+    const int32_t begin = std::max<int32_t>(run.x, left_);
+    const int32_t end = std::min<int32_t>(run.x + run.len, left_ + width_);
+    for (int32_t i = begin; i < end; i++) {
+      row_[i - left_] = static_cast<uint16_t>(row_[i - left_] + run.cover);
+    }
+    if (begin < end) {
+      min_x_ = std::min(min_x_, begin - left_);
+      max_x_ = std::max(max_x_, end - left_);
+    }
   }
+  direct_runs_.clear();
+  direct_lo_ = 0;
+  direct_hi_ = 0;
 }
 
 std::vector<Span> CoverageRowBuffer::TakeSpans() {
@@ -88,6 +141,8 @@ void CoverageRowBuffer::SwitchRow(int y) {
   if (curr_y_ != SW_NaN32) {
     FlushRow();
     direct_runs_.clear();
+    direct_lo_ = 0;
+    direct_hi_ = 0;
     // Clear only the dirty extent so the next row starts at zero.
     for (int32_t i = min_x_; i < max_x_; i++) {
       row_[i] = 0;
