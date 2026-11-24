@@ -70,7 +70,13 @@ void SWSpanBrush::Brush() {
       continue;
     }
 
-    auto u_alpha = static_cast<uint8_t>(span.cover & global_alpha_);
+    // Coverage and global alpha must MULTIPLY (MulDiv255Round), not AND: the
+    // bitwise-and turned every partial-coverage span with a fractional paint
+    // alpha into either 0 or the raw alpha bit pattern, so antialiased image
+    // edges under a translucent paint came out far too opaque (e.g. cover 128
+    // x alpha 128 blended at 128 instead of 64).
+    auto u_alpha =
+        static_cast<uint8_t>(MulDiv255Round(span.cover, global_alpha_));
 
     BrushH(x, y, len, u_alpha);
   }
