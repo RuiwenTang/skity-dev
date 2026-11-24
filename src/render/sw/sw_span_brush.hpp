@@ -125,12 +125,9 @@ class PixmapBrush : public SWSpanBrush {
  protected:
   Color CalculateColor(int32_t x, int32_t y) override;
 
-  void BrushH(int32_t x, int32_t y, int32_t length, int32_t alpha) override;
-
  private:
   std::unique_ptr<Bitmap> texture_;
   Matrix points_to_unit_ = {};
-  FilterMode filter_mode_ = FilterMode::kNearest;
   TileMode x_tile_mode_ = TileMode::kClamp;
   TileMode y_tile_mode_ = TileMode::kClamp;
   BitmapSampler bitmap_sampler_;

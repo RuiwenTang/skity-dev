@@ -17,10 +17,6 @@
 #include "src/graphic/color_priv.hpp"
 #include "src/tracing.hpp"
 
-#ifdef SKITY_ARM_NEON
-#include "src/graphic/color_priv_neon.hpp"
-#endif
-
 namespace skity {
 
 namespace {
@@ -36,36 +32,6 @@ float RemapFloatTile(float t, TileMode tile_mode) {
   }
   return t;
 }
-
-#ifdef SKITY_ARM_NEON
-inline float32x4_t Floor(float32x4_t input) {
-  int32x4_t truncated = vcvtq_s32_f32(input);
-  uint32x4_t negative_mask = vcltq_f32(input, vdupq_n_f32(0.0));
-  int32x4_t adjustment = vreinterpretq_s32_u32(negative_mask);
-  int32x4_t floored = vaddq_s32(truncated, adjustment);
-  return vcvtq_f32_s32(floored);
-}
-
-float32x4_t RemapFloatTileNeon(float32x4_t t, TileMode tile_mode) {
-  if (tile_mode == TileMode::kClamp) {
-    t = vmaxq_f32(t, vdupq_n_f32(0.0f));
-    t = vminq_f32(t, vdupq_n_f32(1.0f));
-  } else if (tile_mode == TileMode::kRepeat) {
-    t = vsubq_f32(t, Floor(t));
-  } else if (tile_mode == TileMode::kMirror) {
-    float32x4_t t1 = vsubq_f32(t, vdupq_n_f32(1.0f));
-    float32x4_t half_t1 = vmulq_f32(t1, vdupq_n_f32(0.5f));
-    float32x4_t floor_half_t1 = Floor(half_t1);
-    float32x4_t double_floor_half_t1 =
-        vmulq_f32(vdupq_n_f32(2.0f), floor_half_t1);
-    float32x4_t t2 = vsubq_f32(t1, double_floor_half_t1);
-    t2 = vsubq_f32(t2, vdupq_n_f32(1.0f));
-    t = vabsq_f32(t2);
-  }
-  return t;
-}
-
-#endif
 
 }  // namespace
 
@@ -708,7 +674,6 @@ PixmapBrush::PixmapBrush(std::vector<Span> const& spans, Bitmap* bitmap,
     : SWSpanBrush(spans, bitmap, color_filter, blend, global_alpha),
       texture_(new Bitmap(std::move(pixmap))),
       points_to_unit_(points_to_unit),
-      filter_mode_(sampling.UseCubic() ? FilterMode::kLinear : sampling.filter),
       x_tile_mode_(x_tile_mode),
       y_tile_mode_(y_tile_mode),
       bitmap_sampler_(*texture_.get(), sampling, x_tile_mode, y_tile_mode,
@@ -724,144 +689,6 @@ Color PixmapBrush::CalculateColor(int32_t x, int32_t y) {
   }
 
   return color;
-}
-
-#ifdef SKITY_ARM_NEON
-namespace {
-void CalculateImageColorsNeon(int32_t p_x, int32_t p_y, int32_t p_alpha,
-                              uint32_t p_width, uint32_t p_height,
-                              uint32_t p_row_bytes, uint8_t* p_pixel,
-                              const Matrix& p_points_to_unit,
-                              TileMode x_tile_mode, TileMode y_tile_mode,
-                              uint32_t* p_data) {
-  float32x4_t offset = {0.5f, 1.5f, 2.5f, 3.5f};
-  float32x4_t x = vaddq_f32(vdupq_n_f32(p_x), offset);
-  float32x4_t y = vdupq_n_f32(p_y + 0.5f);
-  // u = scaleX * x + skewX * y + transX
-  float32x4_t u = vmulq_n_f32(x, p_points_to_unit.GetScaleX());  // scaleX * x
-  u = vmlaq_n_f32(u, y, p_points_to_unit.GetSkewX());            // + skewX * y
-  u = vaddq_f32(u,
-                vdupq_n_f32(p_points_to_unit.GetTranslateX()));  // + transX
-  u = RemapFloatTileNeon(u, x_tile_mode);
-
-  // v = skewY * x + scaleY * y + transY
-  float32x4_t v = vmulq_n_f32(x, p_points_to_unit.GetSkewY());  // skewY * x
-  v = vmlaq_n_f32(v, y,
-                  p_points_to_unit.GetScaleY());  // + scaleY * y
-  v = vaddq_f32(v,
-                vdupq_n_f32(p_points_to_unit.GetTranslateY()));  // + transY
-  v = RemapFloatTileNeon(v, y_tile_mode);
-
-  float32x4_t width = vdupq_n_f32(p_width);
-  float32x4_t height = vdupq_n_f32(p_height);
-  float32x4_t x_indices = vmulq_f32(u, width);   // u * width
-  float32x4_t y_indices = vmulq_f32(v, height);  // v * height
-  // clamp to [0, width - 1]
-  x_indices = vmaxq_f32(x_indices, vdupq_n_f32(0.0f));
-  x_indices = vminq_f32(x_indices, vdupq_n_f32(p_width - 1));
-  // clamp to [0, height - 1]
-  y_indices = vmaxq_f32(y_indices, vdupq_n_f32(0.0f));
-  y_indices = vminq_f32(y_indices, vdupq_n_f32(p_height - 1));
-
-  // float -> uint
-  uint32x4_t ix = vcvtq_u32_f32(x_indices);
-  uint32x4_t iy = vcvtq_u32_f32(y_indices);
-
-  // 2D indices -> 1D indices
-  uint32x4_t row_bytes = vdupq_n_u32(p_row_bytes);
-  uint32x4_t indices = vmlaq_u32(vmulq_u32(ix, vdupq_n_u32(4)), row_bytes,
-                                 iy);  // index = iy * stride + ix * 4
-
-  uint32_t indices_array[4];
-  // store indices
-  vst1q_u32(indices_array, indices);
-
-  float32_t u_array[4];
-  if (x_tile_mode == TileMode::kDecal) {
-    vst1q_f32(u_array, u);
-  }
-  float32_t v_array[4];
-  if (y_tile_mode == TileMode::kDecal) {
-    vst1q_f32(v_array, v);
-  }
-
-  for (int i = 0; i < 4; i++) {
-    uint32_t idx = indices_array[i];
-    if (x_tile_mode == TileMode::kDecal &&
-        (u_array[i] < 0.0f || u_array[i] >= 1.0f)) {
-      *(p_data + i) = Color_TRANSPARENT;
-    } else if (y_tile_mode == TileMode::kDecal &&
-               (v_array[i] < 0.0f || v_array[i] >= 1.0f)) {
-      *(p_data + i) = Color_TRANSPARENT;
-    } else {
-      // sample pixel
-      *(p_data + i) = *reinterpret_cast<uint32_t*>(p_pixel + idx);
-    }
-  }
-}
-
-}  // namespace
-
-#endif
-
-void PixmapBrush::BrushH(int32_t x, int32_t y, int32_t length, int32_t alpha) {
-  SKITY_TRACE_EVENT(PixmapBrush_BrushH);
-
-#ifdef SKITY_ARM_NEON
-  // The NEON fast path below samples raw texels with no color space
-  // conversion; a bitmap tagged with a non-sRGB space must use the scalar
-  // sampler for the whole span, or its converted pixels would disagree with
-  // the remainder pixels at the 8-pixel boundary.
-  if (filter_mode_ == FilterMode::kLinear ||
-      !ColorSpaceIsSRGB(texture_->GetPixmap()->GetColorSpace())) {
-    // TODO(zhangzhijian): Accelerate it via neon
-    SWSpanBrush::BrushH(x, y, length, alpha);
-    return;
-  }
-
-  const int32_t N = 8;
-  std::vector<PMColor> colors(static_cast<size_t>(N));
-
-  uint32_t iterations = length / N;
-  int32_t neon_filled = iterations * N;
-
-  for (uint32_t i = 0; i < iterations; i++) {
-    int32_t l = i * N;
-    for (int j = 0; j < 2; j++) {
-      CalculateImageColorsNeon(
-          x + l + j * 4, y, alpha, texture_->Width(), texture_->Height(),
-          texture_->RowBytes(), texture_->GetPixelAddr(), points_to_unit_,
-          x_tile_mode_, y_tile_mode_, colors.data() + j * 4);
-    }
-
-    uint8x8x4_t src = vld4_u8(reinterpret_cast<const uint8_t*>(colors.data()));
-    if (texture_->GetAlphaType() == AlphaType::kUnpremul_AlphaType) {
-      src.val[0] = MulDiv255RoundNeon(src.val[3], src.val[0]);  // src.a * src.r
-      src.val[1] = MulDiv255RoundNeon(src.val[3], src.val[1]);  // src.a * src.g
-      src.val[2] = MulDiv255RoundNeon(src.val[3], src.val[2]);  // src.a * src.b
-    }
-
-    if (alpha != 255) {
-      uint8x8_t a = vdup_n_u8(alpha);
-      src.val[0] = MulDiv255RoundNeon(a, src.val[0]);  // a * src.r
-      src.val[1] = MulDiv255RoundNeon(a, src.val[1]);  // a * src.g
-      src.val[2] = MulDiv255RoundNeon(a, src.val[2]);  // a * src.b
-      src.val[3] = MulDiv255RoundNeon(a, src.val[3]);  // a * src.a
-    }
-    if (texture_->GetColorType() == ColorType::kRGBA) {
-      std::swap(src.val[0], src.val[2]);  // RGBA -> BGRA
-    }
-    vst4_u8(reinterpret_cast<uint8_t*>(colors.data()), src);
-
-    GetRenderTarget().BlendPixelH(x + l, y, colors.data(), N, GetBlendMode());
-  }
-
-  if (neon_filled < length) {
-    SWSpanBrush::BrushH(x + neon_filled, y, length - neon_filled, alpha);
-  }
-#else
-  SWSpanBrush::BrushH(x, y, length, alpha);
-#endif
 }
 
 }  // namespace skity
