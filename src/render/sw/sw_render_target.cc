@@ -39,16 +39,16 @@ void SWRenderTarget::BlendPixel(uint32_t x, uint32_t y, Color4f color,
   this->BlendPixel(x, y, Color4fToColor(color), blend);
 }
 
+// Horizontal blending is deliberately scalar on every architecture. The
+// legacy NEON run blender differed from the scalar PorterDuffBlend by +/-1 on
+// a fraction of (sa, d) combinations, which made arm and x86 legacy output
+// disagree and the SIMD accelerator (anchored to the scalar semantics) differ
+// from the unaccelerated arm path on the same machine. Unifying on the scalar
+// formula makes all three bit-identical for coeff modes; the accelerated
+// path is the fast lane, this one only has to agree with it.
+
 void SWRenderTarget::BlendPixelH(uint32_t x, uint32_t y, PMColor* pm_colors,
                                  uint32_t len, BlendMode blend) {
-#ifdef SKITY_ARM_NEON
-  if (bitmap_->GetAlphaType() == AlphaType::kPremul_AlphaType &&
-      !IsAdvancedBlendMode(blend)) {
-    BlendPixelNeon(x, y, pm_colors, len, blend);
-    return;
-  }
-#endif
-
   for (uint32_t i = 0; i < len; i++) {
     BlendPixel(x + i, y, pm_colors[i], blend);
   }
@@ -56,34 +56,10 @@ void SWRenderTarget::BlendPixelH(uint32_t x, uint32_t y, PMColor* pm_colors,
 
 void SWRenderTarget::BlendPixelH(uint32_t x, uint32_t y, PMColor pm_color,
                                  uint32_t len, BlendMode blend) {
-#ifdef SKITY_ARM_NEON
-  if (bitmap_->GetAlphaType() == AlphaType::kPremul_AlphaType &&
-      !IsAdvancedBlendMode(blend)) {
-    BlendPixelNeon(x, y, pm_color, len, blend);
-    return;
-  }
-#endif
-
   for (uint32_t i = 0; i < len; i++) {
     BlendPixel(x + i, y, pm_color, blend);
   }
 }
-
-#ifdef SKITY_ARM_NEON
-void SWRenderTarget::BlendPixelNeon(uint32_t x, uint32_t y, PMColor* pm_colors,
-                                    uint32_t len, BlendMode blend) {
-  auto dst = pixel_addr_ + y * bitmap_->RowBytes() + x * 4;
-
-  ProterDuffBlendNeon(pm_colors, reinterpret_cast<uint32_t*>(dst), len, blend);
-}
-
-void SWRenderTarget::BlendPixelNeon(uint32_t x, uint32_t y, PMColor pm_color,
-                                    uint32_t len, BlendMode blend) {
-  auto dst = pixel_addr_ + y * bitmap_->RowBytes() + x * 4;
-
-  ProterDuffBlendNeon(pm_color, reinterpret_cast<uint32_t*>(dst), len, blend);
-}
-#endif
 
 bool SWRenderTarget::FastBlend(uint32_t x, uint32_t y, Color color,
                                BlendMode blend) {

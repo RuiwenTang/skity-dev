@@ -14,13 +14,6 @@
 #include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
 
-#ifdef SKITY_ARM_NEON
-#include <array>
-#include <cstring>
-
-#include "src/graphic/color_priv_neon.hpp"
-#endif
-
 namespace skity {
 
 const char* BlendMode_Name(BlendMode bm) {
@@ -139,8 +132,8 @@ inline float SoftLightComponent(float sc, float sa, float dc, float da) {
     const float da_sq = da * da;
     const float da_cu = da_sq * da;
     return (da_sq * (sc - dc * (3.f * sa - 6.f * sc - 1.f)) +
-            12.f * da * d_sq * (sa - 2.f * sc) -
-            16.f * d_cu * (sa - 2.f * sc) - da_cu * sc) /
+            12.f * da * d_sq * (sa - 2.f * sc) - 16.f * d_cu * (sa - 2.f * sc) -
+            da_cu * sc) /
            da_sq;
   }
   return dc * (sa - 2.f * sc + 1.f) + sc -
@@ -304,7 +297,8 @@ PMColor AdvancedBlend(PMColor src, PMColor dst, BlendMode mode) {
       b = (1.f - sa) * db + (1.f - da) * sb + sb * db;
       break;
     case BlendMode::kHue: {
-      const RGB out = BlendHSLC(false, true, {sr, sg, sb}, sa, {dr, dg, db}, da);
+      const RGB out =
+          BlendHSLC(false, true, {sr, sg, sb}, sa, {dr, dg, db}, da);
       r = out.r + dr - dr * sa + sr - sr * da;
       g = out.g + dg - dg * sa + sg - sg * da;
       b = out.b + db - db * sa + sb - sb * da;
@@ -322,7 +316,8 @@ PMColor AdvancedBlend(PMColor src, PMColor dst, BlendMode mode) {
                           QuantizeChannel(b));
     }
     case BlendMode::kColor: {
-      const RGB out = BlendHSLC(false, false, {sr, sg, sb}, sa, {dr, dg, db}, da);
+      const RGB out =
+          BlendHSLC(false, false, {sr, sg, sb}, sa, {dr, dg, db}, da);
       r = out.r + dr - dr * sa + sr - sr * da;
       g = out.g + dg - dg * sa + sg - sg * da;
       b = out.b + db - db * sa + sb - sb * da;
@@ -331,7 +326,8 @@ PMColor AdvancedBlend(PMColor src, PMColor dst, BlendMode mode) {
                           QuantizeChannel(b));
     }
     case BlendMode::kLuminosity: {
-      const RGB out = BlendHSLC(true, false, {sr, sg, sb}, sa, {dr, dg, db}, da);
+      const RGB out =
+          BlendHSLC(true, false, {sr, sg, sb}, sa, {dr, dg, db}, da);
       r = out.r + dr - dr * sa + sr - sr * da;
       g = out.g + dg - dg * sa + sg - sg * da;
       b = out.b + db - db * sa + sb - sb * da;
@@ -414,222 +410,5 @@ PMColor PorterDuffBlend(PMColor src, PMColor dst, BlendMode mode) {
       return dst;
   }
 }
-
-#ifdef SKITY_ARM_NEON
-
-void PMColorSwapRB(uint32_t* colors, uint32_t count) {
-  int32_t i_count = static_cast<int32_t>(count);
-
-  while (i_count >= 8) {
-    uint8x8x4_t rgba = vld4_u8(reinterpret_cast<const uint8_t*>(colors));
-
-    // swap rb
-    std::swap(rgba.val[0], rgba.val[2]);
-
-    vst4_u8(reinterpret_cast<uint8_t*>(colors), rgba);
-    colors += 8;
-    i_count -= 8;
-  }
-
-  while (i_count > 0) {
-    auto color = *colors;
-    *colors = ColorSetARGB(ColorGetA(color), ColorGetB(color), ColorGetG(color),
-                           ColorGetR(color));
-    i_count--;
-
-    colors++;
-  }
-}
-
-void ProterDuffBlendNeon(uint32_t* src, uint32_t* dst, uint32_t len,
-                         BlendMode mode) {
-  PMColorSwapRB(src, len);
-
-  if (mode == BlendMode::kClear) {
-    std::memset(dst, 0, len * 4);
-  } else if (mode == BlendMode::kSrc) {
-    std::memcpy(dst, src, len * 4);
-  } else if (mode == BlendMode::kDst) {
-    return;
-  } else {
-    uint32_t iterations = len / 8;
-    uint32_t neon_filled = iterations * 8;
-
-    for (uint32_t i = 0; i < iterations; i++) {
-      if (mode == BlendMode::kSrcOver) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcOverNeon(vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                              vld4_u8(reinterpret_cast<const uint8_t*>(src))));
-      } else if (mode == BlendMode::kDstOver) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcOverNeon(vld4_u8(reinterpret_cast<const uint8_t*>(src)),
-                              vld4_u8(reinterpret_cast<const uint8_t*>(dst))));
-      } else if (mode == BlendMode::kSrcIn) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcInNeon(vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                            vld4_u8(reinterpret_cast<const uint8_t*>(src))));
-      } else if (mode == BlendMode::kDstIn) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcInNeon(vld4_u8(reinterpret_cast<const uint8_t*>(src)),
-                            vld4_u8(reinterpret_cast<const uint8_t*>(dst))));
-      } else if (mode == BlendMode::kSrcOut) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcOutNeon(vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                             vld4_u8(reinterpret_cast<const uint8_t*>(src))));
-      } else if (mode == BlendMode::kDstOut) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcOutNeon(vld4_u8(reinterpret_cast<const uint8_t*>(src)),
-                             vld4_u8(reinterpret_cast<const uint8_t*>(dst))));
-      } else if (mode == BlendMode::kSrcATop) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcATopNeon(vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                              vld4_u8(reinterpret_cast<const uint8_t*>(src))));
-      } else if (mode == BlendMode::kDstATop) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcATopNeon(vld4_u8(reinterpret_cast<const uint8_t*>(src)),
-                              vld4_u8(reinterpret_cast<const uint8_t*>(dst))));
-      } else if (mode == BlendMode::kXor) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMXorNeon(vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                          vld4_u8(reinterpret_cast<const uint8_t*>(src))));
-      } else if (mode == BlendMode::kPlus) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMPlusNeon(vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                           vld4_u8(reinterpret_cast<const uint8_t*>(src))));
-      } else if (mode == BlendMode::kModulate) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMModulateNeon(vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                               vld4_u8(reinterpret_cast<const uint8_t*>(src))));
-      } else if (mode == BlendMode::kScreen) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMScreenNeon(vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                             vld4_u8(reinterpret_cast<const uint8_t*>(src))));
-      }
-
-      dst += 8;
-      src += 8;
-    }
-
-    int32_t left_overs = len - neon_filled;
-    while (left_overs--) {
-      *dst = PorterDuffBlend(*src, *dst, mode);
-      dst++;
-      src++;
-    }
-  }
-}
-
-void ProterDuffBlendNeon(uint32_t src, uint32_t* dst, uint32_t len,
-                         BlendMode mode) {
-  src = PMColorSwapRB(src);
-
-  if (mode == BlendMode::kClear) {
-    std::memset(dst, 0, len * 4);
-  } else if (mode == BlendMode::kSrc) {
-    uint32_t iterations = len / 4;
-    uint32_t neon_filled = iterations * 4;
-    uint32x4_t vectorVal = {src, src, src, src};
-
-    for (uint32_t i = 0; i < iterations; ++i) {
-      vst1q_u32(dst, vectorVal);
-      dst += 4;
-    }
-
-    int32_t leftovers = len - neon_filled;
-    while (leftovers--) *dst++ = src;
-
-  } else if (mode == BlendMode::kDst) {
-    return;
-  } else {
-    uint32_t iterations = len / 8;
-    uint32_t neon_filled = iterations * 8;
-
-    std::array<PMColor, 8> pm_colors{
-        src, src, src, src, src, src, src, src,
-    };
-
-    for (uint32_t i = 0; i < iterations; i++) {
-      if (mode == BlendMode::kSrcOver) {
-        vst4_u8(
-            reinterpret_cast<uint8_t*>(dst),
-            PMSrcOverNeon(
-                vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data()))));
-      } else if (mode == BlendMode::kDstOver) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcOverNeon(
-                    vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data())),
-                    vld4_u8(reinterpret_cast<const uint8_t*>(dst))));
-      } else if (mode == BlendMode::kSrcIn) {
-        vst4_u8(
-            reinterpret_cast<uint8_t*>(dst),
-            PMSrcInNeon(
-                vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data()))));
-      } else if (mode == BlendMode::kDstIn) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcInNeon(
-                    vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data())),
-                    vld4_u8(reinterpret_cast<const uint8_t*>(dst))));
-      } else if (mode == BlendMode::kSrcOut) {
-        vst4_u8(
-            reinterpret_cast<uint8_t*>(dst),
-            PMSrcOutNeon(
-                vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data()))));
-      } else if (mode == BlendMode::kDstOut) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcOutNeon(
-                    vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data())),
-                    vld4_u8(reinterpret_cast<const uint8_t*>(dst))));
-      } else if (mode == BlendMode::kSrcATop) {
-        vst4_u8(
-            reinterpret_cast<uint8_t*>(dst),
-            PMSrcATopNeon(
-                vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data()))));
-      } else if (mode == BlendMode::kDstATop) {
-        vst4_u8(reinterpret_cast<uint8_t*>(dst),
-                PMSrcATopNeon(
-                    vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data())),
-                    vld4_u8(reinterpret_cast<const uint8_t*>(dst))));
-      } else if (mode == BlendMode::kXor) {
-        vst4_u8(
-            reinterpret_cast<uint8_t*>(dst),
-            PMXorNeon(
-                vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data()))));
-      } else if (mode == BlendMode::kPlus) {
-        vst4_u8(
-            reinterpret_cast<uint8_t*>(dst),
-            PMPlusNeon(
-                vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data()))));
-      } else if (mode == BlendMode::kModulate) {
-        vst4_u8(
-            reinterpret_cast<uint8_t*>(dst),
-            PMModulateNeon(
-                vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data()))));
-      } else if (mode == BlendMode::kScreen) {
-        vst4_u8(
-            reinterpret_cast<uint8_t*>(dst),
-            PMScreenNeon(
-                vld4_u8(reinterpret_cast<const uint8_t*>(dst)),
-                vld4_u8(reinterpret_cast<const uint8_t*>(pm_colors.data()))));
-      }
-
-      dst += 8;
-    }
-
-    int32_t left_overs = len - neon_filled;
-    while (left_overs--) {
-      *dst = PorterDuffBlend(src, *dst, mode);
-      dst++;
-    }
-  }
-}
-
-#endif
 
 }  // namespace skity

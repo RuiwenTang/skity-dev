@@ -9,22 +9,9 @@
 #include <skity/graphic/color.hpp>
 #include <skity/macros.hpp>
 
-#ifdef SKITY_ARM_NEON
-#include <arm_neon.h>
-#endif
-
 namespace skity {
 
 PMColor PorterDuffBlend(PMColor src, PMColor dst, BlendMode mode);
-
-#ifdef SKITY_ARM_NEON
-void ProterDuffBlendNeon(uint32_t* src, uint32_t* dst, uint32_t len,
-                         BlendMode mode);
-
-void ProterDuffBlendNeon(uint32_t src, uint32_t* dst, uint32_t len,
-                         BlendMode mode);
-
-#endif
 
 constexpr bool IsAdvancedBlendMode(BlendMode mode) {
   return mode > BlendMode::kLastCoeffMode;
