@@ -628,13 +628,14 @@ class AcceleratedGradientColorBrush : public GradientColorBrush {
     params_.seg_start = seg_start_.data();
     params_.seg_end = seg_end_.data();
     params_.colors = &info_.colors.front().e[0];
-    // Bake the stop chain into the 512-entry LUT the kernels fetch from.
-    lut_.resize(512);
-    if (!sw_accel::BuildGradientLUT(params_, lut_.data())) {
+    // Fetch the baked stop chain from the per-thread LUT cache (keyed on
+    // the stop table only - animated transforms reuse one entry). The
+    // pointer is valid for this draw, which is exactly its lifetime here.
+    params_.lut = sw_accel::AcquireGradientLUT(params_);
+    if (params_.lut == nullptr) {
       return false;
     }
-    params_.lut = lut_.data();
-    params_.lut_entries = static_cast<int32_t>(lut_.size());
+    params_.lut_entries = 512;
     return true;
   }
 
@@ -642,7 +643,6 @@ class AcceleratedGradientColorBrush : public GradientColorBrush {
   sw_accel::GradientParams params_ = {};
   std::vector<float> seg_start_;
   std::vector<float> seg_end_;
-  std::vector<uint32_t> lut_;
   bool params_built_ = false;
   bool use_accel_ = false;
 };

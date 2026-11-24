@@ -461,6 +461,99 @@ bool BuildGradientLUT(const GradientParams& params, uint32_t* lut) {
   return true;
 }
 
+namespace {
+
+// Per-thread LUT cache. The entries that matter for an animated UI are very
+// few (each gradient of the scene), so a flat array with round-robin
+// eviction keeps it simple; the hash only fast-rejects, equality is
+// verified against the full stop table.
+struct GradientLUTCacheSlot {
+  uint64_t hash = 0;
+  // Identity of the stop table the LUT was built from.
+  int32_t tile_mode = -1;
+  bool use_offsets = false;
+  float first_offset = 0.f;
+  int32_t color_count = 0;
+  std::vector<float> seg_start;
+  std::vector<float> seg_end;
+  std::vector<float> colors;
+  std::vector<uint32_t> lut;
+};
+
+// Sized so a typical scene's gradients all stay resident (the example
+// scene alone has five); 8 x 2KB of thread-local storage.
+constexpr size_t kGradientLUTCacheSlots = 8;
+
+uint64_t StopTableHash(const GradientParams& p) {
+  uint64_t h = 1469598103934665603ull;  // FNV-1a
+  const auto mix = [&h](const void* data, size_t bytes) {
+    const auto* b = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < bytes; i++) {
+      h ^= b[i];
+      h *= 1099511628211ull;
+    }
+  };
+  mix(&p.tile_mode, sizeof(p.tile_mode));
+  mix(&p.use_offsets, sizeof(p.use_offsets));
+  mix(&p.first_offset, sizeof(p.first_offset));
+  mix(&p.color_count, sizeof(p.color_count));
+  const size_t segs =
+      static_cast<size_t>(p.color_count > 0 ? p.color_count - 1 : 0);
+  mix(p.seg_start, segs * sizeof(float));
+  mix(p.seg_end, segs * sizeof(float));
+  mix(p.colors, static_cast<size_t>(p.color_count) * 4 * sizeof(float));
+  return h;
+}
+
+bool StopTableEqual(const GradientLUTCacheSlot& slot, const GradientParams& p) {
+  const size_t segs = static_cast<size_t>(p.color_count - 1);
+  return slot.tile_mode == p.tile_mode && slot.use_offsets == p.use_offsets &&
+         slot.first_offset == p.first_offset &&
+         slot.color_count == p.color_count && slot.seg_start.size() == segs &&
+         memcmp(slot.seg_start.data(), p.seg_start, segs * sizeof(float)) == 0 &&
+         memcmp(slot.seg_end.data(), p.seg_end, segs * sizeof(float)) == 0 &&
+         memcmp(slot.colors.data(), p.colors,
+                static_cast<size_t>(p.color_count) * 4 * sizeof(float)) == 0;
+}
+
+}  // namespace
+
+const uint32_t* AcquireGradientLUT(const GradientParams& params) {
+  if (params.color_count < 2 || params.seg_start == nullptr ||
+      params.seg_end == nullptr || params.colors == nullptr) {
+    return nullptr;
+  }
+  thread_local GradientLUTCacheSlot slots[kGradientLUTCacheSlots];
+  thread_local size_t next = 0;
+
+  const uint64_t hash = StopTableHash(params);
+  for (GradientLUTCacheSlot& slot : slots) {
+    if (slot.lut.empty() || slot.hash != hash || !StopTableEqual(slot, params)) {
+      continue;
+    }
+    return slot.lut.data();
+  }
+  GradientLUTCacheSlot& slot = slots[next];
+  next = (next + 1) % kGradientLUTCacheSlots;
+  slot.hash = hash;
+  slot.tile_mode = params.tile_mode;
+  slot.use_offsets = params.use_offsets;
+  slot.first_offset = params.first_offset;
+  slot.color_count = params.color_count;
+  const size_t segs = static_cast<size_t>(params.color_count - 1);
+  slot.seg_start.assign(params.seg_start, params.seg_start + segs);
+  slot.seg_end.assign(params.seg_end, params.seg_end + segs);
+  slot.colors.assign(params.colors,
+                     params.colors +
+                         static_cast<size_t>(params.color_count) * 4);
+  slot.lut.resize(512);
+  if (!BuildGradientLUT(params, slot.lut.data())) {
+    slot.lut.clear();
+    return nullptr;
+  }
+  return slot.lut.data();
+}
+
 bool FillGradientSpans(const GradientParams& params, BlendMode mode,
                        uint8_t* dst_base, size_t row_bytes, int32_t width,
                        int32_t height, const Span* spans, size_t span_count) {

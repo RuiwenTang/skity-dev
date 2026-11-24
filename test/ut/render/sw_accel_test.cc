@@ -514,6 +514,107 @@ void DrawGradientScene(skity::Canvas* canvas) {
 // contributes about 2 per channel; on arm the legacy blend additionally
 // runs through NEON helpers that differ from the scalar formula by at most
 // 1 (a pre-existing skity inconsistency). Hence <= 3.
+// Cache semantics of AcquireGradientLUT: the key covers the stop table and
+// tile mode but not the transform (animated gradients hit), and round-robin
+// eviction under more gradients than cache slots never returns a mismatched
+// table.
+TEST(SWAccel, GradientLUTCacheKeysOnStopTableOnly) {
+  uint32_t state = 0x1234567u;
+  constexpr int32_t kW = 24;
+  constexpr int32_t kH = 4;
+  std::vector<uint32_t> bitmap(kW * kH);
+  std::vector<Span> spans;
+  for (int32_t y = 0; y < kH; y++) {
+    spans.push_back(Span{0, y, kW, 255});
+  }
+
+  // Same stop table under two transforms must return the same cached entry.
+  TestGradient ga = RandomGradient(state);
+  ga.type = 0;
+  TestGradient gb = ga;
+  gb.m[0] = ga.m[0] * 3.f;
+  gb.m[1] = -ga.m[1] + 0.05f;
+  gb.m[2] = ga.m[2] + 0.4f;
+
+  std::vector<float> ss, se, co;
+  std::vector<uint32_t> fresh_lut;
+  auto params_of = [&](const TestGradient& g, bool cached) {
+    // ToParams builds a fresh LUT into fresh_lut; for the cached variant the
+    // pointer comes from AcquireGradientLUT instead.
+    skity::sw_accel::GradientParams p = ToParams(g, &ss, &se, &co, &fresh_lut);
+    if (cached) {
+      p.lut = skity::sw_accel::AcquireGradientLUT(p);
+    }
+    return p;
+  };
+
+  const skity::sw_accel::GradientParams pa = params_of(ga, true);
+  const skity::sw_accel::GradientParams pb = params_of(gb, true);
+  ASSERT_NE(nullptr, pa.lut);
+  ASSERT_NE(nullptr, pb.lut);
+  // Same stop table -> one cache entry, and its content matches a fresh
+  // build bit-exactly.
+  EXPECT_EQ(pa.lut, pb.lut);
+  EXPECT_EQ(0, memcmp(pa.lut, fresh_lut.data(), 512 * sizeof(uint32_t)));
+
+  // Fill with the cached entry and compare against the scalar reference.
+  for (const TestGradient* g : {&ga, &gb}) {
+    const skity::sw_accel::GradientParams p = params_of(*g, true);
+    ASSERT_NE(nullptr, p.lut);
+    for (auto& px : bitmap) {
+      px = 0xdeadbeefu;
+    }
+    ASSERT_TRUE(skity::sw_accel::FillGradientSpans(
+        p, BlendMode::kSrc, reinterpret_cast<uint8_t*>(bitmap.data()), kW * 4,
+        kW, kH, spans.data(), spans.size()));
+    for (int32_t y = 0; y < kH; y++) {
+      for (int32_t x = 0; x < kW; x++) {
+        const uint32_t expect = GradientWordRef(*g, x, y, 255);
+        const uint32_t got = bitmap[static_cast<size_t>(y) * kW + x];
+        for (int shift = 0; shift < 32; shift += 8) {
+          const int32_t d = static_cast<int32_t>((expect >> shift) & 0xff) -
+                            static_cast<int32_t>((got >> shift) & 0xff);
+          ASSERT_LE(d < 0 ? -d : d, 4) << "x " << x << " y " << y;
+        }
+      }
+    }
+  }
+
+  // More distinct gradients than cache slots, drawn round-robin twice: the
+  // second pass runs entirely on evicted-and-rebuilt entries; every fill
+  // must still match its own reference.
+  std::vector<TestGradient> many;
+  for (int i = 0; i < 12; i++) {
+    TestGradient g = RandomGradient(state);
+    g.type = i % 2;
+    many.push_back(g);
+  }
+  for (int round = 0; round < 2; round++) {
+    for (const TestGradient& g : many) {
+      const skity::sw_accel::GradientParams p = params_of(g, true);
+      ASSERT_NE(nullptr, p.lut);
+      for (auto& px : bitmap) {
+        px = 0xdeadbeefu;
+      }
+      ASSERT_TRUE(skity::sw_accel::FillGradientSpans(
+          p, BlendMode::kSrc, reinterpret_cast<uint8_t*>(bitmap.data()), kW * 4,
+          kW, kH, spans.data(), spans.size()));
+      for (int32_t y = 0; y < kH; y++) {
+        for (int32_t x = 0; x < kW; x++) {
+          const uint32_t expect = GradientWordRef(g, x, y, 255);
+          const uint32_t got = bitmap[static_cast<size_t>(y) * kW + x];
+          for (int shift = 0; shift < 32; shift += 8) {
+            const int32_t d = static_cast<int32_t>((expect >> shift) & 0xff) -
+                              static_cast<int32_t>((got >> shift) & 0xff);
+            ASSERT_LE(d < 0 ? -d : d, 4)
+                << "round " << round << " x " << x << " y " << y;
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST(SWAccel, GradientCanvasAccelMatchesLegacy) {
   constexpr int32_t kW = 96;
   constexpr int32_t kH = 72;

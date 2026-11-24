@@ -243,7 +243,12 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   **每目标单独 TU 编译**(CMake 后缀注入,AVX2 拷贝独立 /arch:AVX2),
   列入 M4;
 - Windows 上 `*_Legacy` A/B 臂语义失效(开关切的是 exe 内静态副本而非
-  DLL 的),对比测试需在 macOS/Linux 跑。
+  DLL 的),对比测试需在 macOS/Linux 跑;
+- **LUT 跨 draw 缓存**(`AcquireGradientLUT`):thread_local 8 槽轮转,
+  键 = 停点表 + tile(哈希快筛 + 全量比对防碰撞),**矩阵不参与键**——
+  动画渐变(同停点、变矩阵)逐帧全命中;指针仅保证当前 draw 有效(文档化
+  契约)。消除了每帧每渐变 512 次标量链烘焙(arm64 ~6% 段时间;x86 上
+  标量链更慢,收益更大)。arm64 实测持平(166-167 vs 167-168μs)。
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 

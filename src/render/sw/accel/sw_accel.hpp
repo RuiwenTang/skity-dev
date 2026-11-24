@@ -114,6 +114,15 @@ struct GradientParams {
 // unsupported input.
 bool BuildGradientLUT(const GradientParams& params, uint32_t* lut);
 
+// Returns a pointer to the 512-entry LUT for the stop table in params,
+// building it on a cache miss. The LUT depends only on the stop table and
+// tile mode - not on the transform - so animated gradients (same stops,
+// moving matrix) reuse one entry across draws. The cache is per-thread and
+// holds a few entries; the pointer stays valid only until this thread has
+// acquired a few other gradients, so treat it as valid for the current
+// draw. Returns nullptr on unsupported input (caller falls back).
+const uint32_t* AcquireGradientLUT(const GradientParams& params);
+
 // Fills a span list with gradient colors fetched per pixel and blended with
 // the given mode. Destination contract is the same as FillSolidSpans
 // (premul ColorType::kRGBA; spans clamped to the surface). Coverage is
