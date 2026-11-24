@@ -22,6 +22,19 @@ target_compile_options(skity_micro_bench PUBLIC -fno-rtti)
 target_compile_options(skity_micro_bench PUBLIC -std=c++17)
 target_compile_definitions(skity_micro_bench PUBLIC -DDISABLE_SKITY_EXPERIMENTAL_WARNINGS)
 
+# On MSVC the accelerator archive must precede the skity import library:
+# skity.dll exports the runtime switch (SW_ACCEL_API reuses SKITY_API), so
+# skity.lib provides it as well, and link.exe reports LNK2005 when the
+# archive's definition is scanned after the import-library thunk. With this
+# order the bench binds to its own statically linked copy, so the
+# runtime-switch A/B arms stay meaningless on Windows (as they already were
+# before the export existed). Everywhere else skity comes first and the
+# toggle reaches the shared library's switch, which is what the A/B arms
+# are supposed to measure.
+if(MSVC AND TARGET skity_sw_accel)
+  target_link_libraries(skity_micro_bench PRIVATE skity_sw_accel)
+endif()
+
 target_link_libraries(skity_micro_bench
     PUBLIC
     skity::skity
@@ -33,6 +46,6 @@ target_link_libraries(skity_micro_bench PRIVATE glm::glm-header-only)
 # sw_benchmarks.cc drives FillSolidSpans directly; it is hidden from the
 # shared library (only the runtime switch is exported), so the bench needs
 # the accelerator statically, like skity_unit_test.
-if(TARGET skity_sw_accel)
+if(NOT MSVC AND TARGET skity_sw_accel)
   target_link_libraries(skity_micro_bench PRIVATE skity_sw_accel)
 endif()

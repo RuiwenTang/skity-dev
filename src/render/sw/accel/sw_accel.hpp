@@ -10,6 +10,7 @@
 
 #include <skity/graphic/blend_mode.hpp>
 #include <skity/graphic/tile_mode.hpp>
+#include <skity/macros.hpp>
 
 #include "src/render/sw/sw_subpixel.hpp"
 
@@ -17,12 +18,18 @@
 // such as the examples calls it); every other entry point is used inside
 // the library or by targets that link skity_sw_accel statically, and stays
 // hidden together with the Highway namespace. Unified C-ABI-only builds
-// export nothing here either.
-#if !defined(SKITY_HIDE_CXX_API) && defined(__GNUC__)
-#define SW_ACCEL_API __attribute__((visibility("default")))
-#else
-#define SW_ACCEL_API
-#endif
+// export nothing here either (SKITY_HIDE_CXX_API is defined on the
+// skity_sw_accel target in that shape; see CMakeLists.txt).
+//
+// This reuses SKITY_API: SKITY_DLL / SKITY_WIN are self-defined by
+// macros.hpp in every TU, so the macro expands to __declspec(dllexport)
+// while compiling sw_accel.cpp too. That is what lifts the two symbols out
+// of the statically linked skity_sw_accel into the skity.dll export table -
+// the dllexport directive travels with the archive member, whereas
+// CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS only scans the target's own objects and
+// never sees symbols coming from static archives. Consumers bind through
+// the skity.lib import library exactly like every other skity symbol.
+#define SW_ACCEL_API SKITY_API
 
 namespace skity {
 namespace sw_accel {

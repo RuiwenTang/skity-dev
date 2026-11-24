@@ -211,6 +211,32 @@ if(${SKITY_SW_ACCEL})
     if(NOT MSVC)
       target_compile_options(skity_sw_accel PRIVATE -fvisibility=hidden)
     endif()
+    if(${SKITY_UNIFIED_LIB})
+      # Same export policy as the skity target in the unified shape: only
+      # the skity_* C ABI may be exported. SW_ACCEL_API reuses SKITY_API,
+      # which must expand to nothing here as well, otherwise MSVC unified
+      # builds export the two C++ runtime-switch symbols from libskity.dll
+      # (GCC unified builds are already covered by the version script).
+      target_compile_definitions(skity_sw_accel PRIVATE SKITY_HIDE_CXX_API=1)
+    endif()
+    if(MSVC)
+      # Disable the AVX2 target copy on MSVC. The multi-target TU must be
+      # compiled at the baseline ISA (MSVC has no per-function target
+      # switching, unlike the GCC/Clang pragmas Highway uses there), and in
+      # that mode MSVC models vector state at 128 bits: the AVX2 kernels
+      # park every 256-bit value on the stack as two 16B halves and reload
+      # it as one 32B vector. Such a load cannot be store-forwarded, so
+      # every reconstitution stalls ~15-20 cycles, and the SrcOver engine
+      # does it three times per 8-px iteration. Measured on a Core Ultra 7
+      # 255H: the AVX2 copy runs 0.5 Gpx/s where the SSE4 copy of the same
+      # source runs 3.6 (/arch:AVX2 would reach 5.6, but cannot be applied
+      # to this TU without leaking VEX instructions into the SSE copies).
+      # Dispatch falls back to SSE4 instead; revisit once the AVX2 kernels
+      # can live in a separately compiled TU.
+      # HWY_AVX2 = 1 << 9 = 512; target-wide so the dispatch tables and
+      # hwy::SupportedTargets() (targets.cc) stay consistent.
+      target_compile_definitions(skity_sw_accel PRIVATE HWY_DISABLED_TARGETS=512)
+    endif()
     target_link_libraries(skity PRIVATE skity_sw_accel)
     target_compile_definitions(skity PUBLIC -DSKITY_SW_ACCEL=1)
   else()
