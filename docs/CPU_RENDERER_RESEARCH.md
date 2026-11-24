@@ -221,6 +221,30 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   fetch 级独立标量镜像 60 轮随机配置 ≤4,Validate 保险丝扩至 4 个梯度
   内核(容差 4,repeat 接缝带跳过)。
 
+**宽度泛化与 x86 首次实测(2026-11,commit b52d54fb/99b4c089)**:
+- 内核改为宽度无关(`ScalableTag`):同一源码 NEON/SSE=128-bit、AVX2=256、
+  AVX-512=512 实例化;shuffle 控制改算术构造(`(iota&~3)+byte`,宽度无关),
+  LowerHalf/UpperHalf+Combine 结构天然宽度无关,钉死宽度的只有 tag/表/定长
+  数组。chunk 循环方案在 NEON 上回退 20%(2×8B 载存替代 1×16B)后弃用;
+  arm64 实测与 128-bit 版逐位一致、性能持平;
+- **x86 首次实测(Core Ultra 7 255H,MSVC,dispatch SSE4)——部署目标兑现**:
+  premul 场景 **1545μs vs 4508μs legacy = -66%**(对照 arm64 仅 -12%),
+  纯混合微基准 **9.8-13.2×**。证实了"x86 legacy 的 fetch+blend 两半都是
+  纯标量(无 NEON 路径),向量化收益远大于 arm"的预判;
+- MSVC 工程三连修(99b4c089):①`SW_ACCEL_API` 复用 `SKITY_API`——MSVC 的
+  WINDOWS_EXPORT_ALL_SYMBOLS 不从静态库填导出表,必须让 dllexport 指令
+  随归档成员进入 skity.dll;②micro bench 链接顺序(skity.lib 亦提供开关
+  符号,后扫归档触发 LNK2005);③**MSVC 禁用 AVX2 目标**:多目标 TU 必须
+  按基线 ISA 编译(MSVC 无 per-function target 切换),该模式下 MSVC 以
+  128-bit 建模向量状态——AVX2 内核把每个 256-bit 值拆成两个 16B 栈存再
+  32B 重载,无法 store-forward(~15-20 cycle/处,SrcOver 引擎每 8px 三处),
+  实测 AVX2 0.5 Gpx/s vs SSE4 3.6 = **7× 回退**;`/arch:AVX2` 全 TU 可达
+  5.6 但会把 VEX 编码泄漏进 SSE 拷贝,不可用。后续正解 = blend2d 式
+  **每目标单独 TU 编译**(CMake 后缀注入,AVX2 拷贝独立 /arch:AVX2),
+  列入 M4;
+- Windows 上 `*_Legacy` A/B 臂语义失效(开关切的是 exe 内静态副本而非
+  DLL 的),对比测试需在 macOS/Linux 跑。
+
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
 > **校准状态(2026-11)**:以下为开工前的机制推算,现在有实测锚点了。
@@ -229,10 +253,14 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
 > 一致):SrcOver 14.4×、SrcOverOpaque 14.3×、SrcIn 13.3×、Modulate 13.6×,
 > 吞吐 ~16.6 Gpx/s vs ~1.16 Gpx/s;
 > **"整体场景 3-10×:不成立**——solid 内核接通后端到端仅 -12%(第 6 节分场景
-> 表)。差距来源不是内核不够快,而是推算只按"逐像素标量→SIMD"估了混合一段,
+> 表,arm64)。差距来源不是内核不够快,而是推算只按"逐像素标量→SIMD"估了混合一段,
 > 没计入 (a)gradient/text 根本不经过被加速的路径(Gradient 40% + Text 25%),
 > (b)光栅化与 span 物化占其余大头。混合阶段已不再是瓶颈,后续收益排序:
 > M1b-4 gradient fetcher(~40%)> M2 glyph atlas(~25%)> 其余。
+> **x86 更新(2026-11,Core Ultra 7 255H/MSVC)**:gradient 加速 + SSE4 宽度
+> 接通后,同一 premul 场景 **-66%**(1545 vs 4508μs)——"整体 3-10×"在部署
+> 架构上以累计方式接近兑现(1.5-3× 端到端),arm64 的 -12% 是该机器标量
+> 浮点过强所致,不是方案上限。
 - 合成端(逐像素标量→AVX2 批处理):微基准 8-16×;
 - 整体场景 3-10×,叠进程级并发近线性;
 - 对照:静态 SIMD 方案 ≈ blend2d JIT 的 85-95%(arm64 上 JIT 也只有 128-bit NEON,差距仅内联/常量折叠;两段式 span 税只落在 gradient/pattern 上),绝对量级对齐 Skia CPU raster;
