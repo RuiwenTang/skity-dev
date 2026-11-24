@@ -141,14 +141,23 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   运行期开关双镜像使其 legacy 臂无效,纯混合微基准不受影响) |
 | M2 结构(2026-11-24 定稿) | **M2-0 测量/回退设施修复**(开关单镜像、梯度标量回退、
   blit_two_alphas 语义回归、行缓冲重叠折叠、arm NEON 混合统一)✅ →
-  **M2-1 图像采样**(标量 cubic + 逐像素 src 混合引擎 + SIMD nearest/bilinear,
-  `cover & global_alpha` 位与 bug 顺带修)→ **M2-2 glyph A8 atlas**
+  **M2-1 图像采样** ✅(标量 cubic 镜像 GPU fast-bicubic + SIMD nearest/bilinear
+  fetch/blend 引擎 + 逐像素 src 混合引擎提取复用,`cover & global_alpha` 位与 bug
+  顺带修,arm NEON 采样统一到标量)→ **M2-2 glyph A8 atlas**
   (软绘切 FreeType mask,复用 AtlasBitmap/PrepareDirectGlyphs)→
   **M2-3 raster clip**(rect fast path + A8 mask 两档,修 min(cover)/PerformMerge)→
   **M2-4 行直连整合**(行缓冲直供消费端、梯度全 28 模式、删加速态 BrushH)|
   unit + 软件 golden(`--backend=software`,已全绿)+ 分段/逐次绘制基准 |
 | M3 验收 | CPU golden 通道(DisplayList→PNG diff);与 GPU/SwiftShader ±1~2/255 交叉容差 | test-runner 增加 CPU 后端 |
-| M4 扩展 | DisplayList band 并行、AVX-512 评估、mipmap | 基准驱动 |
+| M4 扩展 | DisplayList band 并行、AVX-512 评估、mipmap。**mipmap 现状
+  (2026-11-24 摸底):两侧均未端到端实现——GPU 采样器描述符已传
+  MipmapMode(gpu_sampler.cc)但 `FindOrCreateTexture` 构造 TextureImpl
+  恒 `mipmapped_=false`,`UploadTextureImage` 永远单 level,
+  GenerateMipmaps(vk/gl/web blit pass 已写好)从不触发,请求即被硬件
+  LOD clamp 退化为 base-level;CPU `BitmapSampler` 与 M2-1 `ImageParams`
+  均不读 MipmapMode。落地必须两侧同步(GPU 接通 mip 链生成 + 纹理缓存
+  key 加 mipmap 维度;CPU mip 链缓存 keyed on pixmap、LOD 按 span 预
+  计算、kLinear 跨级混合),验收用小图大缩放棋盘(摩尔纹)对 GPU | 基准驱动 |
 
 **M1a 实测记录(2026-11,arm64,commit a4d3cd13)**:
 - 关键教训:第一版把不透明内部段也塞进稠密累计,纯光栅化基准回归 11.5×
@@ -381,6 +390,90 @@ NEON 块与声明一并删除;`color_priv_neon` 的采样助手被 PixmapBrush
 
 单测 1275 项:1270 通过 + 3 跳过 + 2 失败(既有 Arena Release death test
 环境项),新增 `SWCoverageRowBuffer.OverlappingDirectRunFoldsIntoDenseCoverage`。
+
+### M2-1 记录(2026-11-24,图像采样)
+
+**交付**:
+
+1. **`cover & global_alpha` 位与 bug**(`SWSpanBrush::Brush()`):位与改为
+   `MulDiv255Round` 乘法折算。仅影响 PixmapBrush(solid/gradient brush 恒传
+   global alpha 1.0,`MulDiv255Round(cover, 255) == cover` 恒等):半透明
+   paint 下的 AA 图像边缘此前严重过不透明(cover 128 × alpha 128 实际混在
+   128 而非 64——部分覆盖 span 直接被吞成 alpha 位模式)。加速梯度路径的
+   原始 cover 直传与该恒等式一致,不受影响。
+2. **标量 cubic**:`BitmapSampler::SampleUnitCubic` 镜像 GPU
+   `wgsl_texture_fragment.cc` 的 fast-bicubic(cubic_weight +
+   cubic_sample_1d 每轴折叠出两个加权点 + 4 次双线性采样合成,16 个最近邻
+   tap → 4 次双线性);每个子采样点按 tile 模式二次 remap(与 GPU shader 的
+   per-sample remap_float_tile 对应);kRepeat 包裹沿用
+   `SampleUnitLinear` 的 tap 处理。取代原「cubic 回退 bilinear」。
+3. **SIMD 图像引擎**:`ImageParams`(纹理基址/矩阵/tile/filter/alpha type/
+   global alpha)+ `FillImageSpans`(nearest/linear × kSrc/kSrcOver 共 4 个
+   kernel,HWY dispatch)。uv 变换与 tile remap 走 f32 lane,texel gather 走
+   偏移数组 + 标量取字(基线 target 无 SIMD gather),双线性组合逐位复刻
+   `SampleUnitLinear` 的浮点链,premul(A phaType)/coverage(AlphaMulQ)/
+   blend 折叠走既有 u16 引擎算子。decal 蒙版在原始 uv 上先行判定(与
+   GetColor 次序一致);所有索引在 tile 寻址后统一 clamp,溢出/越界 uv 也
+   不会越界 gather。Validate 保险丝扩至图像 kernel(2 alpha type × 2 filter ×
+   4 tile 组合 × 2 mode × 2 cover,位精确)。
+4. **PixmapBrush 挂接**:`Brush()` 覆写把整个 span 列表一次交给加速器;
+   构造期判定加速条件(kRGBA 纹理、色彩变换 noop、非 cubic、无 color
+   filter、kSrc/kSrcOver、有限矩阵、偏移 fit u32),其余配置(cubic、色彩
+   过滤、非 noop 色彩空间、其它 blend)留在标量 sampler 路径。
+5. **逐像素 src 混合引擎提取**:`VariableSrcOverStore`(r = s +
+   (d*(256-sa))>>8,掩码尾组 + **零填充栈缓冲**)由 gradient/image kernel
+   共用;顺带修复 gradient kernel 尾组 `LoadU` 对 span 末尾的越界读(行末
+   最后一组可达 vl-rem*4 字节越过缓冲区)。
+6. **arm NEON 采样统一到标量语义**(M2-0 混合统一同款决策):删除
+   `PixmapBrush` 的 `CalculateImageColorsNeon` 路径——`vmlaq` 的 FMA uv
+   数学与标量链差 ulp,arm/x86 legacy 输出本就不一致;加速内核锚定标量
+   链后,legacy 臂保留 NEON 只会污染 A/B。`color_priv_neon.hpp` 随之失去
+   全部使用者,M2-0 记录中「采样助手保留」的状态就此失效(文件已删除)。
+
+**位精确经验(本轮方法论核心)**:SIMD kernel 与标量链「表达式相同」≠ 位
+相同,编译器收缩形态必须逐链匹配(均有单测锁定):
+
+- 组合式 `w00*v00 + w10*v10 + w01*v01 + w11*v11` 被 LLVM **前端**收缩成
+  fmadd(fp-contract=on,**-O0 也收缩**),而标量 sampler 的乘与加隔着 glm
+  算子函数边界、不收缩 → kernel 侧把四个乘积拆成独立语句(独立语句 =
+  独立 full expression,前端不跨语句收缩);
+- uv 链 `(fx*m00 + fy*m01) + m02` 的标量版被收缩成
+  `fmadd(fx, m00, fy*m01) + m02`(**第一个**乘积融合、第二个乘积先舍入,
+  反汇编确认),而 kernel 的 hwy 算子(NEON intrinsics)天然不可收缩 →
+  必须显式 `MulAdd(fx, m00, Mul(fy, m01))` 匹配同一形态;MulAdd 参数顺序
+  反了(融合第二个乘积)仍是错;
+- 验证集同时覆盖 Debug(-O0)与 Release(-O3)构建(SWAccel 10/10 双侧)。
+
+**性能(arm64 Release,`cmake_bench_release`;Debug 构建的数字无效,见
+M1b 教训——本轮重蹈后再次确认)**:
+缩放线性采样 500×400 **966μs vs 7263μs = -87%**(4.8 vs 36.3 ns/px,
+M2-0 锚点 38.7 ns/px 闭环);全场景 premul 986 vs 7958μs = -88%
+(M2-0 记录 1105 vs 7760 = -86%,增量来自场景内的图像段接入);
+逐次绘制 757 ns/draw、文字 3.44 μs/glyph(M2-0 锚点 810/3.7,噪声带内)。
+采样链路级(探针直拍 `FillImageSpans` vs 逐像素 `GetColor` 链,同轮测量,
+legacy 臂未计 blend/brush,比例偏保守):linear 1:1 与 2× 缩小
+**5.2 vs 29.0~29.6 ns/px = -82%(5.6×)**,nearest 1:1 **1.3 vs
+12.2~12.8 ns/px = -89%(9.3×)**;端到端 1:1 nearest blit 973μs/800k =
+1.22 ns/px(M2-0 legacy 锚点 6.2 = -80%)。测量注意:Validate 保险丝的
+一次性成本(约 30ms)会摊销到进程内第一个基准配置上——采样级 A/B 必须
+先空转一轮再计时。
+
+**GPU 基线一致性(probe 实测)**:`image_cubic_catmull_rom` /
+`image_cubic_mitchell`(GPU 共享基线):max channel diff = 1,无任何像素
+通道差 >2(81.6% / 76.4% 像素逐位相同)——CPU cubic 与 GPU fast-bicubic
+的浮点残差全部落在 ±1;cubic 基线无需重录,旧 bilinear fallback 时代的
+宽容差通过也升级为 ±1 级一致。
+
+**验证**:golden-shape 284/284、golden-text 8/8 零失败(`--backend=software`,
+含 4 个 ImageGolden——nearest/linear 面板直接打 SIMD 路径、cubic 面板打
+标量新路径);单测新增 `ImageSpansMatchLegacySamplerChain`(对真实
+BitmapSampler + PorterDuffBlend 链位精确:premul/unpremul × 双 filter ×
+4 tile 组合 × 双矩阵 × kSrc/kSrcOver × 双 global alpha)与
+`ImageCanvasAccelMatchesLegacy`(canvas A/B 双臂位相等:tile-mode shader、
+非 sRGB 纹理、半透明 paint、cubic 各走对应路径);Debug + Release 双构建
+单测全绿(Release 目录 7 个 ShaderWriter 失败为该目录 WGX_SPIRV_BACKEND=OFF
+的配置遗留,与本片无关)。
+
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
