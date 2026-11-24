@@ -19,8 +19,7 @@
 // restored on exit so other benchmarks are unaffected.
 class AccelToggle {
  public:
-  explicit AccelToggle(bool enabled)
-      : previous_(skity::sw_accel::IsEnabled()) {
+  explicit AccelToggle(bool enabled) : previous_(skity::sw_accel::IsEnabled()) {
     skity::sw_accel::SetEnabled(enabled);
   }
   ~AccelToggle() { skity::sw_accel::SetEnabled(previous_); }
@@ -80,15 +79,15 @@ void RunExampleSection(benchmark::State& state) {
 
 }  // namespace
 
-#define SKITY_BENCH_SECTION(name, fn, tx, ty)                             \
-  static void BM_SWSection_##name(benchmark::State& state) {              \
-    RunExampleSection<skity::example::basic::fn, tx, ty>(state);          \
-  }                                                                      \
-  BENCHMARK(BM_SWSection_##name)->Unit(benchmark::kMicrosecond);          \
-  static void BM_SWSection_##name##_Legacy(benchmark::State& state) {     \
-    AccelToggle toggle(false);                                             \
-    RunExampleSection<skity::example::basic::fn, tx, ty>(state);          \
-  }                                                                      \
+#define SKITY_BENCH_SECTION(name, fn, tx, ty)                         \
+  static void BM_SWSection_##name(benchmark::State& state) {          \
+    RunExampleSection<skity::example::basic::fn, tx, ty>(state);      \
+  }                                                                   \
+  BENCHMARK(BM_SWSection_##name)->Unit(benchmark::kMicrosecond);      \
+  static void BM_SWSection_##name##_Legacy(benchmark::State& state) { \
+    AccelToggle toggle(false);                                        \
+    RunExampleSection<skity::example::basic::fn, tx, ty>(state);      \
+  }                                                                   \
   BENCHMARK(BM_SWSection_##name##_Legacy)->Unit(benchmark::kMicrosecond);
 
 #ifdef SKITY_SW_ACCEL
@@ -137,14 +136,14 @@ void RunSolidBlend(benchmark::State& state) {
                                       kBlendH, spans.data(), spans.size());
     } else {
       for (const skity::Span& span : spans) {
-        uint32_t* row = pixels.data() + static_cast<size_t>(span.y) * kBlendW +
-                        span.x;
+        uint32_t* row =
+            pixels.data() + static_cast<size_t>(span.y) * kBlendW + span.x;
         const uint32_t src =
             span.cover == 255 ? src_pm : skity::AlphaMulQ(src_pm, span.cover);
         for (int32_t i = 0; i < span.len; i++) {
           // Memory words are kRGBA; blend in the PMColor convention.
-          row[i] = skity::PMColorSwapRB(skity::PorterDuffBlend(
-              src, skity::PMColorSwapRB(row[i]), kMode));
+          row[i] = skity::PMColorSwapRB(
+              skity::PorterDuffBlend(src, skity::PMColorSwapRB(row[i]), kMode));
         }
       }
     }
@@ -160,14 +159,14 @@ void RunSolidBlend(benchmark::State& state) {
 
 }  // namespace
 
-#define SKITY_BENCH_BLEND(name, mode, opaque)                               \
-  static void BM_SWSolidBlend_##name(benchmark::State& state) {             \
-    RunSolidBlend<true, skity::BlendMode::mode, opaque>(state);             \
-  }                                                                        \
-  BENCHMARK(BM_SWSolidBlend_##name)->Unit(benchmark::kMicrosecond);         \
-  static void BM_SWSolidBlend_##name##_Scalar(benchmark::State& state) {    \
-    RunSolidBlend<false, skity::BlendMode::mode, opaque>(state);            \
-  }                                                                        \
+#define SKITY_BENCH_BLEND(name, mode, opaque)                            \
+  static void BM_SWSolidBlend_##name(benchmark::State& state) {          \
+    RunSolidBlend<true, skity::BlendMode::mode, opaque>(state);          \
+  }                                                                      \
+  BENCHMARK(BM_SWSolidBlend_##name)->Unit(benchmark::kMicrosecond);      \
+  static void BM_SWSolidBlend_##name##_Scalar(benchmark::State& state) { \
+    RunSolidBlend<false, skity::BlendMode::mode, opaque>(state);         \
+  }                                                                      \
   BENCHMARK(BM_SWSolidBlend_##name##_Scalar)->Unit(benchmark::kMicrosecond);
 
 SKITY_BENCH_BLEND(SrcOver, kSrcOver, false)
@@ -308,6 +307,93 @@ static void BM_SWDrawBigImageWithBlur(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_SWDrawBigImageWithBlur)->Unit(benchmark::kMicrosecond);
+
+// Down-scaled linear sampling: the fetch costs per pixel, not per source
+// image, so a half-size destination isolates the scaled-sampling path from
+// the 1:1 blit measured by BM_SWDrawBigImageLinear.
+static void BM_SWDrawImageScaledLinear(benchmark::State& state) {
+  skity::Bitmap bitmap1(1000, 800, skity::AlphaType::kPremul_AlphaType);
+  auto canvas1 = skity::Canvas::MakeSoftwareCanvas(&bitmap1);
+
+  skity::Paint paint;
+  paint.SetColor(skity::Color_WHITE);
+  canvas1->DrawPaint(paint);
+  skity::example::basic::draw_canvas(canvas1.get());
+
+  skity::Bitmap bitmap2(500, 400, skity::AlphaType::kPremul_AlphaType);
+  auto canvas2 = skity::Canvas::MakeSoftwareCanvas(&bitmap2);
+  std::shared_ptr<skity::Image> image =
+      skity::Image::MakeImage(bitmap1.GetPixmap());
+  skity::SamplingOptions options{skity::FilterMode::kLinear,
+                                 skity::MipmapMode::kNone};
+
+  for (auto _ : state) {
+    canvas2->DrawImage(image, skity::Rect::MakeWH(500.f, 400.f), options);
+  }
+}
+BENCHMARK(BM_SWDrawImageScaledLinear)->Unit(benchmark::kMicrosecond);
+
+// Per-draw overhead: ten thousand small shapes stress the fixed cost of one
+// draw call (state stack, path conversion, rasterizer setup, brush
+// construction, span materialization) rather than pixel throughput.
+static void BM_SWDrawManySmallRects(benchmark::State& state) {
+  skity::Bitmap bitmap(1000, 800, skity::AlphaType::kPremul_AlphaType);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+  skity::Paint paint;
+  paint.SetColor(skity::Color_BLUE);
+  paint.SetAntiAlias(true);
+
+  constexpr int kRows = 100;
+  constexpr int kCols = 100;
+  std::vector<skity::Rect> rects;
+  rects.reserve(kRows * kCols);
+  for (int r = 0; r < kRows; r++) {
+    for (int c = 0; c < kCols; c++) {
+      rects.push_back(skity::Rect::MakeXYWH(
+          static_cast<float>(c * 10), static_cast<float>(r * 8), 6.f, 5.f));
+    }
+  }
+
+  for (auto _ : state) {
+    for (const skity::Rect& rect : rects) {
+      canvas->DrawRect(rect, paint);
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * kRows * kCols);
+}
+BENCHMARK(BM_SWDrawManySmallRects)->Unit(benchmark::kMicrosecond);
+
+// Text through the legacy path-rasterization pipeline (M2-2 replaces it with
+// the A8 glyph atlas): per-glyph path load, path rasterization and mask
+// blending at a steady state, with the scaler cache warm.
+static void BM_SWDrawTextBlobFill(benchmark::State& state) {
+  skity::Bitmap bitmap(1000, 800, skity::AlphaType::kPremul_AlphaType);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+  auto typeface = skity::Typeface::GetDefaultTypeface();
+  if (typeface == nullptr) {
+    state.SkipWithError("no default typeface on this host");
+    return;
+  }
+
+  skity::Paint paint;
+  paint.SetTypeface(typeface);
+  paint.SetTextSize(24.f);
+  paint.SetAntiAlias(true);
+  paint.SetColor(skity::Color_BLACK);
+
+  skity::TextBlobBuilder builder;
+  auto blob =
+      builder.BuildTextBlob("Hello software renderer, bench 0123", paint);
+  if (!blob) {
+    state.SkipWithError("text blob build failed");
+    return;
+  }
+
+  for (auto _ : state) {
+    canvas->DrawTextBlob(blob.get(), 20.f, 64.f, paint);
+  }
+}
+BENCHMARK(BM_SWDrawTextBlobFill)->Unit(benchmark::kMicrosecond);
 
 class GradientSpanTest : public skity::GradientColorBrush {
  public:
