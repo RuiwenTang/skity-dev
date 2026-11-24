@@ -137,8 +137,16 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   premul 强制 + gradient LUT 加速器(512 项 + 跨 draw 缓存)+ 宽度泛化(128/256/512)|
   三实现互拍单测 ✅ + `test/bench/micro/sw_benchmarks.cc` 前后对比 ✅
   (x86 -66%,arm64 位精确;kernel 直连行缓冲与 BrushH 逐像素路径的删除
-  随 M2 clip mask 化落地) |
-| M2 结构 | raster clip、glyph A8 atlas、cubic 采样 | unit + 文字基准 |
+  随 M2 clip mask 化落地。注:M1b 的场景级 A/B 数字见下方 M2-0 勘误——
+  运行期开关双镜像使其 legacy 臂无效,纯混合微基准不受影响) |
+| M2 结构(2026-11-24 定稿) | **M2-0 测量/回退设施修复**(开关单镜像、梯度标量回退、
+  blit_two_alphas 语义回归、行缓冲重叠折叠、arm NEON 混合统一)✅ →
+  **M2-1 图像采样**(标量 cubic + 逐像素 src 混合引擎 + SIMD nearest/bilinear,
+  `cover & global_alpha` 位与 bug 顺带修)→ **M2-2 glyph A8 atlas**
+  (软绘切 FreeType mask,复用 AtlasBitmap/PrepareDirectGlyphs)→
+  **M2-3 raster clip**(rect fast path + A8 mask 两档,修 min(cover)/PerformMerge)→
+  **M2-4 行直连整合**(行缓冲直供消费端、梯度全 28 模式、删加速态 BrushH)|
+  unit + 软件 golden(`--backend=software`,已全绿)+ 分段/逐次绘制基准 |
 | M3 验收 | CPU golden 通道(DisplayList→PNG diff);与 GPU/SwiftShader ±1~2/255 交叉容差 | test-runner 增加 CPU 后端 |
 | M4 扩展 | DisplayList band 并行、AVX-512 评估、mipmap | 基准驱动 |
 
@@ -303,6 +311,76 @@ x86/MSVC(场景 -66%、纯混合 9.8-13.2×,Core Ultra 7 255H)。
 kernel 直连行缓冲——Text 段 ~25% 是下一个最大杠杆)、sweep/conical、
 AVX2 独立 TU(M4)、Windows 上 *_Legacy A/B 臂失效、两个待决策项
 (arm NEON 统一、Color4fToColor 舍入等 legacy 瑕疵)。
+
+### M2-0 记录(2026-11-24,测量/回退设施修复,先行切片)
+
+M2 动工前先修测量设施,过程中发现 **三处 M1 记录与事实不符**,均已证实、
+修复并有单测锁定:
+
+1. **运行期开关双镜像(自 f54a5a32 起失效,不限 Windows)**。
+   `skity_micro_bench`/`skity_unit_test` 静态链接 `skity_sw_accel` 且排在
+   `libskity` 之前,exe 内自带一份 `SetEnabled/IsEnabled/g_runtime_enabled`,
+   而渲染器(libskity 内)读另一份——`*_Legacy` 基准臂和端到端 A/B 测试
+   切的永远是 exe 本地副本。**M1 所有场景级「accel vs legacy」数字因此
+   无效(两臂都在跑加速路径)**:「全场景 -11.8%」「Gradient 持平」
+   「arm64 -12%」及第 6 节分场景表全部作废;纯混合微基准
+   (直调 FillSolidSpans)不受影响;x86 -66% 的对照臂来源同样存疑,
+   需在修复后的构建上复测。修复:开关状态移入 skity 目标自己的 TU
+   (`src/render/sw/accel/sw_accel_switch.cc`,CMake 在 SKITY_SW_ACCEL 块
+   `target_sources` 进 skity),加速库只留内核;`FillSolidSpans/
+   FillGradientSpans` 不再读开关(调用方门卫),`Available()`(Validate
+   保险丝)保留在库内。nm 验收:测试/基准二进制对开关符号均为
+   undefined import(来自 libskity)。
+   **修复后重测(arm64 M 系列,7 轮中位)**:全场景 1105 vs 7760μs
+   (-86%)、BasicShapes 33.8 vs 294μs(-88%)、Gradient 171 vs 1179μs
+   (-86%,此前「arm64 梯度持平」即本缺陷所致)、Text 355 vs 528μs(-33%)。
+2. **梯度加速 brush 的运行期回退输出全透明**。`AcceleratedGradientColorBrush`
+   继承返回透明的基类 `CalculateColor`,开关关闭/保险丝熔断/配置拒绝时
+   落入该路径——示例按 S 切 legacy 会丢全部渐变;端到端测试因缺陷 1
+   两臂同跑加速而从未发现。修复:构造时持有真实标量
+   Linear/RadialGradientColorBrush 作为 fallback;
+   `GradientCanvasAccelMatchesLegacy` 增加两条断言:legacy 臂必须真的
+   画出渐变(防回退失效)+ 两臂必须存在 LUT-vs-标量差异(防双镜像复发,
+   solid 模式两臂逐位相同无法承担此断言)。
+3. **M1a 的 `blit_two_alphas` 缩放是语义回归**。legacy 累计路径
+   (SpanBuilder)接收 a1/a2 原值(已按子扫描线切片表达);M1a 引入
+   `scale_partial_alpha` 先乘 fullAlpha——45° 斜边覆盖减半(实测
+   `(110*128)>>8=55`,两条半步累计 110,legacy 为 220)。这是
+   ClipPathDifference(62 像素差)、PositionedGlyphs(68 像素差)、
+   DrawDegenerateCubic(120 像素差)三个 golden 红例的共同根因。
+   已恢复原值直传(仅此一处;blit_single_alpha 的缩放与 legacy 一致,
+   保留)。
+   同批修复 **CoverageRowBuffer 发射不变量**:direct run 与稠密脏区间
+   (或另一个 direct run)重叠时必须折叠进稠密累加器(`FoldDirectRunsIntoDense`,
+   O(1) 范围预检保住 AAA 行的常量路径),否则 flush 发出两条重叠 span,
+   同一像素被 SrcOver 混合两次(描边角部实测 208+48 双混合变暗)。
+
+**软件 golden 基线判定**(merge-base `5d2af705` worktree 构建 + 三方像素
+对比;merge-base 上 4 条基线全部精确复现 → 差异确系分支引入):
+
+| 用例 | 修复后 vs 基线 | 判定 |
+|---|---|---|
+| ShapeGolden.DrawDegenerateCubic(共享 GPU 基线) | 200 像素全部 ≤2(与 main 相同的 NEON 舍入水平) | 无需重录,通过 |
+| ClipGolden.ClipPathDifference | 21 像素 >2(≤50 容差内);残余为 span 合并喂给 spans_subtraction 的边界近似 | 无需重录,通过;M2-3 raster clip 重做时一并消除 |
+| SoftwareTextGolden.PositionedGlyphs | 3 像素 ≤2 | 无需重录,通过 |
+| SoftwareTextGolden.ClipRect(require_exact) | 42 像素 ±1 = NEON→标量统一的预期输出变化 | 重录 `_sw` 基线 ✅ |
+
+现状:**golden-shape 24/24、golden-text 2/2 全绿**(`--backend=software`)。
+
+**arm NEON 混合统一(M1 遗留决策落地)**:删除 `sw_render_target` 的
+`ProterDuffBlendNeon` 路径(BlendPixelH 全平台标量;`blend_mode.cc` 的
+NEON 块与声明一并删除;`color_priv_neon` 的采样助手被 PixmapBrush
+最近邻路径使用,保留)。arm legacy 输出与 x86/加速路径逐位一致,
+「28.6% 的 (sa,d) 组合 ±1」跨架构漂移消除。代价:legacy 图像 1:1 blit
+2.3→6.2 ns/px(兼容路径,M2-1 SIMD 图像管线取代)。
+
+**新基准基线**(arm64 Release,accel on,加入 `sw_benchmarks.cc`):
+逐次绘制开销 **810 ns/draw**(1 万个 6×5 矩形,M2-3/M2-4 目标)、
+缩放线性采样 **38.7 ns/px**(M2-1 目标)、文字 **3.7 μs/glyph**
+(M2-2 目标)、1:1 最近邻 blit 6.2 ns/px。
+
+单测 1275 项:1270 通过 + 3 跳过 + 2 失败(既有 Arena Release death test
+环境项),新增 `SWCoverageRowBuffer.OverlappingDirectRunFoldsIntoDenseCoverage`。
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
