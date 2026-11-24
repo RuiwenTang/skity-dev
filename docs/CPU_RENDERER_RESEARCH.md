@@ -128,14 +128,16 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
 
 | 阶段 | 交付物 | 验收 |
 |---|---|---|
-| M1a 行缓冲(可独立合入) | `CoverageRowBuffer`(稠密 u16 行累计)替换双 builder;行末
+| M1a 行缓冲 ✅(59ab9ba4..bf71de5f) | `CoverageRowBuffer`(稠密 u16 行累计)替换双 builder;行末
   `FlushTo` 适配器再生 `vector<Span>`,**下游(clip/brush/blend)零改动**;
   顺带删 per-trapezoid 堆分配、全宽清零、`edges_too_close` 兜底、死代码 delegate |
-  现有 sw_canvas_test 5 用例 + 新旧 builder 逐行等价性单测(迁移期) |
-| M1b 内核 | Highway 接入 + 28 BlendMode kernel(先吃 post-clip runs)+ 函数表 dispatch +
-  Validate 首帧保险丝 + premul 强制;kernel 直连行缓冲与 BrushH 逐像素路径的删除
-  随 M2 clip mask 化落地 |
-  三实现互拍单测 + `test/bench/micro/sw_benchmarks.cc` 前后对比 |
+  现有 sw_canvas_test 5 用例 + 新旧 builder 逐行等价性单测(迁移期) ✅ |
+| M1b 内核 ✅(e9278bef..fb471df4) | Highway 接入 + **28 BlendMode kernel 全表**(coeff=整数 SIMD,
+  可分离 advanced=f32 SIMD,HSL=标量内核)+ 函数表 dispatch + Validate 首帧保险丝 +
+  premul 强制 + gradient LUT 加速器(512 项 + 跨 draw 缓存)+ 宽度泛化(128/256/512)|
+  三实现互拍单测 ✅ + `test/bench/micro/sw_benchmarks.cc` 前后对比 ✅
+  (x86 -66%,arm64 位精确;kernel 直连行缓冲与 BrushH 逐像素路径的删除
+  随 M2 clip mask 化落地) |
 | M2 结构 | raster clip、glyph A8 atlas、cubic 采样 | unit + 文字基准 |
 | M3 验收 | CPU golden 通道(DisplayList→PNG diff);与 GPU/SwiftShader ±1~2/255 交叉容差 | test-runner 增加 CPU 后端 |
 | M4 扩展 | DisplayList band 并行、AVX-512 评估、mipmap | 基准驱动 |
@@ -277,6 +279,30 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   Validate 保险丝 + premul 强制 + gradient LUT 加速器,x86(-66%)/arm64
   双平台验证。遗留:M2 结构项(glyph atlas/clip/行直连)、sweep/conical、
   AVX2 独立 TU(M4)。
+
+### M1 整体状态(2026-11 关闭)
+
+**已交付并验证**:
+- 光栅化前端:`CoverageRowBuffer` 混合行缓冲(O(1) 常量段直发 + 稠密 u16
+  AA 累计),legacy 双 builder 与已知 bug(blit_two_alphas 错位)一并清除;
+- 合成后端:Highway 加速器 `skity_sw_accel`,**全部 28 个 BlendMode 有内核**
+  ——15 coeff 模式整数 SIMD(位精确,纯混合 14×)、11 可分离 advanced 模式
+  f32 SIMD(WGSL 对齐,3×)、4 HSL 标量内核;函数表 dispatch + 运行时开关
+  (仅 2 个导出符号)+ Validate 首帧保险丝 + premul/kRGBA 门卫;
+- 梯度:linear/radial LUT 加速(512 项精确链烘焙 + 跨 draw 线程本地缓存,
+  矩阵不参与键);sweep/conical 暂回退 legacy;
+- CPU 标量参考:advanced 模式从"SrcOver 回退"修正为 WGSL 逐表达式对齐
+  (这是 GPU 对齐的必要修复,也是 advanced 加速的对照基线);
+- 工程面:MSVC(导出/链接/AVX2 禁用)、iOS/Android 打包路径(编译期开关)、
+  宽度泛化(NEON/SSE 128-bit 实测,AVX2/512 已实例化待 MSVC 独立 TU 启用)。
+
+**验证状态**:arm64(位精确矩阵 + 全量单测 1269/1274,仅剩 Arena 环境项)、
+x86/MSVC(场景 -66%、纯混合 9.8-13.2×,Core Ultra 7 255H)。
+
+**有意遗留**(非阻塞,均有记录):M2 结构项(glyph A8 atlas、raster clip、
+kernel 直连行缓冲——Text 段 ~25% 是下一个最大杠杆)、sweep/conical、
+AVX2 独立 TU(M4)、Windows 上 *_Legacy A/B 臂失效、两个待决策项
+(arm NEON 统一、Color4fToColor 舍入等 legacy 瑕疵)。
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
