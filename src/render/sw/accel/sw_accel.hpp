@@ -118,9 +118,13 @@ bool BuildGradientLUT(const GradientParams& params, uint32_t* lut);
 // building it on a cache miss. The LUT depends only on the stop table and
 // tile mode - not on the transform - so animated gradients (same stops,
 // moving matrix) reuse one entry across draws. The cache is per-thread and
-// holds a few entries; the pointer stays valid only until this thread has
-// acquired a few other gradients, so treat it as valid for the current
-// draw. Returns nullptr on unsupported input (caller falls back).
+// holds a few entries; the pointer stays valid only until the acquiring
+// thread has acquired a few other gradients, so it MUST be consumed on the
+// same thread, within the current draw - never handed to another thread
+// (the slot can be evicted and overwritten under it, which corrupts output
+// silently). Band-parallel callers should acquire per worker, or copy the
+// 2KB table into the job. Returns nullptr on unsupported input (the caller
+// falls back).
 const uint32_t* AcquireGradientLUT(const GradientParams& params);
 
 // Fills a span list with gradient colors fetched per pixel and blended with
