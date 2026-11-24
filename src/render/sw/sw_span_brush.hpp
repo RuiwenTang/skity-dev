@@ -14,6 +14,10 @@
 #include <skity/graphic/tile_mode.hpp>
 #include <vector>
 
+#ifdef SKITY_SW_ACCEL
+#include "src/render/sw/accel/sw_accel.hpp"
+#endif
+
 #include "src/graphic/bitmap_sampler.hpp"
 #include "src/render/sw/sw_render_target.hpp"
 #include "src/render/sw/sw_subpixel.hpp"
@@ -123,6 +127,11 @@ class PixmapBrush : public SWSpanBrush {
   ~PixmapBrush() override = default;
 
  protected:
+  // Hands the whole span list to the SIMD accelerator when the draw is one
+  // of the supported configurations; falls back to the per-span legacy path
+  // otherwise.
+  void Brush() override;
+
   Color CalculateColor(int32_t x, int32_t y) override;
 
  private:
@@ -131,6 +140,12 @@ class PixmapBrush : public SWSpanBrush {
   TileMode x_tile_mode_ = TileMode::kClamp;
   TileMode y_tile_mode_ = TileMode::kClamp;
   BitmapSampler bitmap_sampler_;
+#ifdef SKITY_SW_ACCEL
+  // Precomputed accelerator params, filled by the constructor when the draw
+  // matches the accelerated configurations (see sw_accel.hpp).
+  sw_accel::ImageParams accel_params_ = {};
+  bool accel_ok_ = false;
+#endif
 };
 
 }  // namespace skity

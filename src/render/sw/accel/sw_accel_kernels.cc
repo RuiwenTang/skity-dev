@@ -16,6 +16,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <algorithm>
+
 #include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
 #include "src/render/sw/accel/sw_accel.hpp"
@@ -27,6 +29,14 @@ namespace sw_accel {
 namespace HWY_NAMESPACE {
 
 namespace hn = hwy::HWY_NAMESPACE;
+
+// Loads one 4-byte texel word; memcpy keeps strict-aliasing clean and
+// compiles to a single unaligned load on every target.
+inline uint32_t LoadTexelWord(const uint8_t* HWY_RESTRICT p) {
+  uint32_t word;
+  memcpy(&word, p, 4);
+  return word;
+}
 
 // Blends a run of premul RGBA8888 pixels in place against a constant premul
 // src color. Bit-exact with the scalar path (PorterDuffBlend): coverage has
@@ -637,6 +647,52 @@ void SolidRunLuminosityKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 // Gradient fetch + blend kernels
 // ---------------------------------------------------------------------------
 
+// Per-pixel-src blend engine, shared by the gradient and image kernels:
+// blends one group of premul src pixels (carried in the interleaved byte
+// layout) SrcOver onto dst and stores back, masking the store to `rem`
+// pixels. r = s + ((d * (256 - sa)) >> 8) per channel - the same formula the
+// coeff engine uses with a constant src, bit-exact with PorterDuffBlend.
+//
+// The destination load is zero-padded into a stack buffer when the group is
+// partial, so a span ending at the buffer end never reads past it; the
+// blended garbage lanes are discarded by the masked store.
+template <class V8>
+static inline void VariableSrcOverStore(V8 s8, uint8_t* HWY_RESTRICT dst,
+                                        size_t rem) {
+  const hn::DFromV<V8> d8;
+  const hn::Half<decltype(d8)> d8h;
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
+  const size_t vl = hn::Lanes(d8);
+  const size_t group = vl / 4;
+
+  const auto sa8 = BroadcastLaneByte(d8, s8, 3);
+  const auto k256 = hn::Set(d16, uint16_t{256});
+  const auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, s8));
+  const auto s_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, s8));
+  const auto scale_lo =
+      hn::Sub(k256, hn::PromoteTo(d16, hn::LowerHalf(d8h, sa8)));
+  const auto scale_hi =
+      hn::Sub(k256, hn::PromoteTo(d16, hn::UpperHalf(d8h, sa8)));
+
+  alignas(64) uint8_t dst_buf[64];
+  if (rem < group) {
+    memcpy(dst_buf, dst, rem * 4);
+    memset(dst_buf + rem * 4, 0, vl - rem * 4);
+  }
+  const auto d8v = rem >= group ? hn::LoadU(d8, dst) : hn::LoadU(d8, dst_buf);
+  const auto d_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, d8v));
+  const auto d_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, d8v));
+  const auto r_lo = hn::Add(s_lo, hn::ShiftRight<8>(hn::Mul(d_lo, scale_lo)));
+  const auto r_hi = hn::Add(s_hi, hn::ShiftRight<8>(hn::Mul(d_hi, scale_hi)));
+  const auto out8 =
+      hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo));
+  if (rem >= group) {
+    hn::StoreU(out8, d8, dst);
+  } else {
+    hn::BlendedStore(out8, hn::FirstN(d8, rem * 4), d8, dst);
+  }
+}
+
 // Fetches the gradient color per pixel and writes/blends it. The parameter t
 // keeps the exact legacy float chain (MapPoint of {x + 0.5f, y + 0.5f},
 // nearly-zero snaps, tile remap); the color comes from the per-draw LUT
@@ -793,29 +849,9 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
       // ---- variable-src SrcOver: d + (d * (256 - sa)) >> 8 -------------
       alignas(64) uint32_t words[16];
       hn::Store(word, u32, words);
-      const auto s8 = hn::LoadU(d8, reinterpret_cast<const uint8_t*>(words));
-      const auto sa8 = BroadcastLaneByte(d8, s8, 3);
-      const auto d8v = hn::LoadU(d8, dst + px * 4);
-      const auto k256 = hn::Set(d16, uint16_t{256});
-      const auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, s8));
-      const auto s_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, s8));
-      const auto scale_lo =
-          hn::Sub(k256, hn::PromoteTo(d16, hn::LowerHalf(d8h, sa8)));
-      const auto scale_hi =
-          hn::Sub(k256, hn::PromoteTo(d16, hn::UpperHalf(d8h, sa8)));
-      const auto d_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, d8v));
-      const auto d_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, d8v));
-      const auto r_lo =
-          hn::Add(s_lo, hn::ShiftRight<8>(hn::Mul(d_lo, scale_lo)));
-      const auto r_hi =
-          hn::Add(s_hi, hn::ShiftRight<8>(hn::Mul(d_hi, scale_hi)));
-      const auto out8 =
-          hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo));
-      if (rem >= group) {
-        hn::StoreU(out8, d8, dst + px * 4);
-      } else {
-        hn::BlendedStore(out8, hn::FirstN(d8, rem * 4), d8, dst + px * 4);
-      }
+      VariableSrcOverStore(
+          hn::LoadU(d8, reinterpret_cast<const uint8_t*>(words)), dst + px * 4,
+          rem);
     }
   }
 }
@@ -844,6 +880,306 @@ void GradientRunRadialSrcOverKernel(uint8_t* HWY_RESTRICT dst,
                                     const GradientParams* gp, int32_t x,
                                     int32_t y, size_t count, uint32_t cover) {
   GradientRunKernelT<true, true>(dst, gp, x, y, count, cover);
+}
+
+// ---------------------------------------------------------------------------
+// Image fetch + blend kernels
+// ---------------------------------------------------------------------------
+
+// RemapFloatTile on f32 lanes; branch order mirrors the scalar function.
+// kDecal falls through (t passes through unchanged) - the decal early-out is
+// a mask on the raw uv applied by the caller, like the scalar GetColor.
+template <class F>
+static inline F RemapTileLanes(F t, int32_t tile_mode) {
+  const hn::DFromV<F> f;
+  const auto zero = hn::Zero(f);
+  const auto one = hn::Set(f, 1.0f);
+  const auto two = hn::Set(f, 2.0f);
+  const auto half = hn::Set(f, 0.5f);
+  if (tile_mode == static_cast<int32_t>(TileMode::kClamp)) {
+    return hn::Max(zero, hn::Min(one, t));
+  } else if (tile_mode == static_cast<int32_t>(TileMode::kRepeat)) {
+    return hn::Sub(t, hn::Floor(t));
+  } else if (tile_mode == static_cast<int32_t>(TileMode::kMirror)) {
+    const auto t1 = hn::Sub(t, one);
+    const auto t2 =
+        hn::Sub(hn::Sub(t1, hn::Mul(two, hn::Floor(hn::Mul(t1, half)))), one);
+    return hn::Abs(t2);
+  }
+  return t;  // kDecal
+}
+
+// Fetches the image color per pixel and writes/blends it, bit-exact with the
+// legacy PixmapBrush chain (BitmapSampler::GetColor through BlendPixelH):
+// the uv transform and tile remap run on f32 lanes, the texel gather goes
+// through a stored offset array (no SIMD gather on the baseline targets), and
+// the bilinear combination reproduces SampleUnitLinear's exact float
+// expression, so every lane agrees with the scalar sampler to the bit. The
+// premul (unpremul textures), coverage and blend folds reuse the u16 engine
+// ops; the store is masked to the span tail and decal lanes are zeroed like
+// the scalar GetColor's transparent early-out. Every index is clamped into
+// the texture after the tile addressing, so overflowed or out-of-range uv
+// lanes (decal axes stay unremapped) still gather in-bounds.
+template <bool kLinear, bool kBlendSrcOver>
+static void ImageRunKernelT(uint8_t* HWY_RESTRICT dst, const ImageParams* ip,
+                            int32_t x, int32_t y, size_t count,
+                            uint32_t alpha) {
+  const ImageParams& p = *ip;
+
+  const hn::ScalableTag<uint8_t> d8;
+  const hn::Half<decltype(d8)> d8h;
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
+  const hn::Half<hn::Half<hn::Rebind<float, decltype(d8)>>> f32;
+  const hn::Half<hn::Half<hn::Rebind<int32_t, decltype(d8)>>> i32;
+  const hn::Half<hn::Half<hn::Rebind<uint32_t, decltype(d8)>>> u32;
+  const size_t vl = hn::Lanes(d8);
+  const size_t group = vl / 4;  // pixels per iteration
+
+  // MapPoint terms, in the scalar expression order. The uv chain below is
+  // contracted like the compiled scalar chain: LLVM turns the plain float
+  // expression (fx * m00 + fy * m01) + m02 into fmadd(fy, m01, fx * m00) +
+  // m02 (verified against the built sampler), so the lanes must use the
+  // same fused form - Highway's intrinsics alone would stay unfused and
+  // drift by 1 ulp at contraction-sensitive coordinates.
+  const auto k05 = hn::Set(f32, 0.5f);
+  const auto fy = hn::Set(f32, y + 0.5f);
+  const auto m00 = hn::Set(f32, p.m00);
+  const auto m01 = hn::Set(f32, p.m01);
+  const auto m02 = hn::Set(f32, p.m02);
+  const auto m10 = hn::Set(f32, p.m10);
+  const auto m11 = hn::Set(f32, p.m11);
+  const auto m12 = hn::Set(f32, p.m12);
+
+  const auto zero = hn::Zero(f32);
+  const auto one = hn::Set(f32, 1.0f);
+
+  const bool x_decal = p.x_tile_mode == static_cast<int32_t>(TileMode::kDecal);
+  const bool y_decal = p.y_tile_mode == static_cast<int32_t>(TileMode::kDecal);
+  const bool x_repeat =
+      p.x_tile_mode == static_cast<int32_t>(TileMode::kRepeat);
+  const bool y_repeat =
+      p.y_tile_mode == static_cast<int32_t>(TileMode::kRepeat);
+
+  const auto tex_w = hn::Set(f32, static_cast<float>(p.tex_width));
+  const auto tex_h = hn::Set(f32, static_cast<float>(p.tex_height));
+  const auto w_last = hn::Set(i32, p.tex_width - 1);
+  const auto h_last = hn::Set(i32, p.tex_height - 1);
+  const auto i_zero = hn::Zero(i32);
+  const auto k4 = hn::Set(u32, 4u);
+  const auto row_bytes = hn::Set(u32, p.tex_row_bytes);
+  // Alpha byte lanes of the promoted halves (bytes 4k + 3); the halves split
+  // at vl / 2, a multiple of 4, so one mask serves both.
+  const auto alpha_lanes =
+      hn::Eq(hn::And(hn::Iota(d16, 0), hn::Set(d16, uint16_t{3})),
+             hn::Set(d16, uint16_t{3}));
+
+  const uint8_t* texels = p.texels;
+
+  size_t px = 0;
+  for (; px < count; px += group) {
+    const size_t rem = count - px;
+    // ---- uv ------------------------------------------------------------
+    const auto fx = hn::Add(
+        hn::ConvertTo(f32, hn::Add(hn::Set(i32, x + static_cast<int32_t>(px)),
+                                   hn::Iota(i32, 0))),
+        k05);
+    // LLVM contracts the scalar chain into fmadd(fx, m00, fy * m01): the
+    // FIRST product fuses, the second stays pre-rounded (verified against
+    // the compiled sampler) - match that operand order exactly.
+    auto u = hn::Add(hn::MulAdd(fx, m00, hn::Mul(fy, m01)), m02);
+    auto v = hn::Add(hn::MulAdd(fx, m10, hn::Mul(fy, m11)), m12);
+    // Decal early-out on the raw uv, before remapping (scalar GetColor
+    // order): out-of-range decal axes sample as transparent.
+    auto decal_mask = hn::MaskFalse(f32);
+    if (x_decal) {
+      decal_mask = hn::Or(decal_mask, hn::Or(hn::Lt(u, zero), hn::Ge(u, one)));
+    }
+    if (y_decal) {
+      decal_mask = hn::Or(decal_mask, hn::Or(hn::Lt(v, zero), hn::Ge(v, one)));
+    }
+    u = RemapTileLanes(u, p.x_tile_mode);
+    v = RemapTileLanes(v, p.y_tile_mode);
+
+    // ---- fetch ---------------------------------------------------------
+    alignas(64) uint32_t words[16];
+    if constexpr (!kLinear) {
+      // Nearest: the scalar sampler truncates the scaled coordinate into
+      // uint32 (glm::clamp<uint32_t> on a non-negative value) and clamps to
+      // the last texel.
+      const auto ix = hn::Min(
+          hn::Max(hn::ConvertTo(i32, hn::Mul(u, tex_w)), i_zero), w_last);
+      const auto iy = hn::Min(
+          hn::Max(hn::ConvertTo(i32, hn::Mul(v, tex_h)), i_zero), h_last);
+      const auto off = hn::Add(hn::Mul(hn::BitCast(u32, iy), row_bytes),
+                               hn::Mul(hn::BitCast(u32, ix), k4));
+      alignas(64) uint32_t offs[16];
+      hn::Store(off, u32, offs);
+      for (size_t j = 0; j < group; j++) {
+        words[j] = LoadTexelWord(texels + offs[j]);
+      }
+    } else {
+      // Bilinear, mirroring SampleUnitLinear exactly: taps at
+      // floor(coord - 0.5) and +1, the fraction kept as the raw float
+      // difference, kRepeat taps wrapped, every other mode clamped, and the
+      // 4-term combination in the scalar expression's association.
+      const auto txm = hn::Sub(hn::Mul(u, tex_w), k05);
+      const auto tym = hn::Sub(hn::Mul(v, tex_h), k05);
+      const auto i0f = hn::Floor(txm);
+      const auto j0f = hn::Floor(tym);
+      const auto a = hn::Sub(txm, i0f);
+      const auto b = hn::Sub(tym, j0f);
+      auto i0 = hn::ConvertTo(i32, i0f);
+      auto j0 = hn::ConvertTo(i32, j0f);
+      auto i1 = hn::Add(i0, hn::Set(i32, 1));
+      auto j1 = hn::Add(j0, hn::Set(i32, 1));
+      // kRepeat wraps the taps; glm::mod over the reachable range [-1, dim]
+      // reduces to conditional adds.
+      if (x_repeat) {
+        const auto tw32 = hn::Set(i32, p.tex_width);
+        i0 = hn::IfThenElse(hn::Lt(i0, i_zero), hn::Add(i0, tw32), i0);
+        i1 = hn::IfThenElse(hn::Ge(i1, tw32), hn::Sub(i1, tw32), i1);
+      }
+      if (y_repeat) {
+        const auto th32 = hn::Set(i32, p.tex_height);
+        j0 = hn::IfThenElse(hn::Lt(j0, i_zero), hn::Add(j0, th32), j0);
+        j1 = hn::IfThenElse(hn::Ge(j1, th32), hn::Sub(j1, th32), j1);
+      }
+      // All modes clamp the taps into the texture (SampleXY's clamp; also
+      // bounds indices that a degenerate uv could push out of range).
+      i0 = hn::Min(hn::Max(i0, i_zero), w_last);
+      i1 = hn::Min(hn::Max(i1, i_zero), w_last);
+      j0 = hn::Min(hn::Max(j0, i_zero), h_last);
+      j1 = hn::Min(hn::Max(j1, i_zero), h_last);
+
+      // Non-negative after the clamp, so the i32 -> u32 bit cast is exact.
+      const auto ox0 = hn::Mul(hn::BitCast(u32, i0), k4);
+      const auto ox1 = hn::Mul(hn::BitCast(u32, i1), k4);
+      const auto oy0 = hn::Mul(hn::BitCast(u32, j0), row_bytes);
+      const auto oy1 = hn::Mul(hn::BitCast(u32, j1), row_bytes);
+      alignas(64) uint32_t offs00[16];
+      alignas(64) uint32_t offs10[16];
+      alignas(64) uint32_t offs01[16];
+      alignas(64) uint32_t offs11[16];
+      hn::Store(hn::Add(oy0, ox0), u32, offs00);
+      hn::Store(hn::Add(oy0, ox1), u32, offs10);
+      hn::Store(hn::Add(oy1, ox0), u32, offs01);
+      hn::Store(hn::Add(oy1, ox1), u32, offs11);
+      alignas(64) float aa[16];
+      alignas(64) float bb[16];
+      hn::Store(a, f32, aa);
+      hn::Store(b, f32, bb);
+
+      alignas(64) uint32_t t00[16];
+      alignas(64) uint32_t t10[16];
+      alignas(64) uint32_t t01[16];
+      alignas(64) uint32_t t11[16];
+      for (size_t j = 0; j < group; j++) {
+        t00[j] = LoadTexelWord(texels + offs00[j]);
+        t10[j] = LoadTexelWord(texels + offs10[j]);
+        t01[j] = LoadTexelWord(texels + offs01[j]);
+        t11[j] = LoadTexelWord(texels + offs11[j]);
+      }
+      for (size_t j = 0; j < group; j++) {
+        // Color4fFromColor on the memory bytes (words are 0xAABBGGRR, bytes
+        // R, G, B, A), the SampleUnitLinear float combination in its exact
+        // expression order, then the Color4fToColor quantization
+        // (clamp(v * 255, 0, 255), truncating cast).
+        const float fa = aa[j];
+        const float fb = bb[j];
+        const float w00 = (1.f - fa) * (1.f - fb);
+        const float w10 = fa * (1.f - fb);
+        const float w01 = (1.f - fa) * fb;
+        const float w11 = fa * fb;
+        const uint32_t c00 = t00[j];
+        const uint32_t c10 = t10[j];
+        const uint32_t c01 = t01[j];
+        const uint32_t c11 = t11[j];
+        float ch[4];
+        for (int c = 0; c < 4; c++) {
+          const float v00 = static_cast<float>((c00 >> (c * 8)) & 0xff) / 255.f;
+          const float v10 = static_cast<float>((c10 >> (c * 8)) & 0xff) / 255.f;
+          const float v01 = static_cast<float>((c01 >> (c * 8)) & 0xff) / 255.f;
+          const float v11 = static_cast<float>((c11 >> (c * 8)) & 0xff) / 255.f;
+          // The four products stay in separate statements: the scalar
+          // sampler rounds each product through glm's component-wise
+          // operators before summing, and letting the compiler contract
+          // this chain into fma (it does, even at -O0) changes the
+          // last-bit rounding of the mix.
+          const float t0 = w00 * v00;
+          const float t1 = w10 * v10;
+          const float t2 = w01 * v01;
+          const float t3 = w11 * v11;
+          const float mixed = t0 + t1 + t2 + t3;
+          const float scaled = std::min(255.f, std::max(0.f, mixed * 255.f));
+          ch[c] = static_cast<float>(static_cast<uint32_t>(scaled));
+        }
+        words[j] = static_cast<uint32_t>(ch[0]) |
+                   (static_cast<uint32_t>(ch[1]) << 8) |
+                   (static_cast<uint32_t>(ch[2]) << 16) |
+                   (static_cast<uint32_t>(ch[3]) << 24);
+      }
+    }
+    // ---- folds + blend ---------------------------------------------------
+    const auto w32 = hn::Load(u32, words);
+    const auto src32 =
+        hn::IfThenElse(hn::RebindMask(u32, decal_mask), hn::Zero(u32), w32);
+    const auto s8 = hn::BitCast(d8, src32);
+    auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, s8));
+    auto s_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, s8));
+    if (!p.src_premul) {
+      // ColorToPMColor on the unpremul sample: rounding premul of the RGB
+      // bytes against the alpha byte, the alpha byte kept as-is.
+      const auto a8 = BroadcastLaneByte(d8, s8, 3);
+      const auto a_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, a8));
+      const auto a_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, a8));
+      s_lo = hn::IfThenElse(alpha_lanes, s_lo, RoundMul(s_lo, a_lo));
+      s_hi = hn::IfThenElse(alpha_lanes, s_hi, RoundMul(s_hi, a_hi));
+    }
+    if (alpha != 255) {
+      // BrushH coverage fold: AlphaMulQ, truncating per channel.
+      const auto cover16 = hn::Set(d16, static_cast<uint16_t>(alpha));
+      s_lo = ScaleMul(s_lo, cover16);
+      s_hi = ScaleMul(s_hi, cover16);
+    }
+    const auto out8 =
+        hn::Combine(d8, hn::TruncateTo(d8h, s_hi), hn::TruncateTo(d8h, s_lo));
+    if constexpr (!kBlendSrcOver) {
+      // kSrc: store the fetched (premul, coverage-folded) colors.
+      if (rem >= group) {
+        hn::StoreU(out8, d8, dst + px * 4);
+      } else {
+        hn::BlendedStore(out8, hn::FirstN(d8, rem * 4), d8, dst + px * 4);
+      }
+    } else {
+      VariableSrcOverStore(out8, dst + px * 4, rem);
+    }
+  }
+}
+
+// kSrc variants: store the fetched colors.
+void ImageRunNearestSrcKernel(uint8_t* HWY_RESTRICT dst, const ImageParams* ip,
+                              int32_t x, int32_t y, size_t count,
+                              uint32_t alpha) {
+  ImageRunKernelT<false, false>(dst, ip, x, y, count, alpha);
+}
+
+void ImageRunLinearSrcKernel(uint8_t* HWY_RESTRICT dst, const ImageParams* ip,
+                             int32_t x, int32_t y, size_t count,
+                             uint32_t alpha) {
+  ImageRunKernelT<true, false>(dst, ip, x, y, count, alpha);
+}
+
+// kSrcOver variants: fetch, then blend as a variable-src SrcOver.
+void ImageRunNearestSrcOverKernel(uint8_t* HWY_RESTRICT dst,
+                                  const ImageParams* ip, int32_t x, int32_t y,
+                                  size_t count, uint32_t alpha) {
+  ImageRunKernelT<false, true>(dst, ip, x, y, count, alpha);
+}
+
+void ImageRunLinearSrcOverKernel(uint8_t* HWY_RESTRICT dst,
+                                 const ImageParams* ip, int32_t x, int32_t y,
+                                 size_t count, uint32_t alpha) {
+  ImageRunKernelT<true, true>(dst, ip, x, y, count, alpha);
 }
 
 }  // namespace HWY_NAMESPACE

@@ -147,6 +147,55 @@ bool FillGradientSpans(const GradientParams& params, BlendMode mode,
                        uint8_t* dst_base, size_t row_bytes, int32_t width,
                        int32_t height, const Span* spans, size_t span_count);
 
+// Precomputed, POD description of one image draw, built by the software
+// brush from the shader's pixmap, transform and sampling options. The
+// kernel reproduces the legacy PixmapBrush chain bit-exactly (the sampled
+// color, its premul fold, the coverage fold and the blend), so accelerated
+// and legacy output are identical - unlike the gradient LUT, there is no
+// rounding headroom.
+struct ImageParams {
+  // Texture base pointer, ColorType::kRGBA memory (bytes [R, G, B, A],
+  // little-endian u32 0xAABBGGRR) with tex_row_bytes stride.
+  const uint8_t* texels;
+  uint32_t tex_row_bytes;
+  int32_t tex_width;
+  int32_t tex_height;
+  // Entries of points_to_unit_ (device pixel center -> unit uv), evaluated
+  // exactly like the scalar MapPoint:
+  // u = ((x + 0.5f) * m00 + (y + 0.5f) * m01) + m02, likewise v with m1x.
+  float m00, m01, m02;
+  float m10, m11, m12;
+  // skity::TileMode values for the u (x) and v (y) axes.
+  int32_t x_tile_mode;
+  int32_t y_tile_mode;
+  // FilterMode::kLinear (false = kNearest). Cubic sampling is not
+  // accelerated; the scalar sampler handles it.
+  bool bilinear;
+  // Texture alpha type == kPremul (kUnpremul textures premultiply the
+  // sampled color after filtering, like the scalar brush).
+  bool src_premul;
+  // Paint alpha (255 * paint.GetAlphaF(), the brush's global_alpha_). Each
+  // span folds its coverage with MulDiv255Round(cover, global_alpha).
+  uint8_t global_alpha;
+};
+
+// Returns true when FillImageSpans supports the blend mode (kSrc/kSrcOver).
+bool SupportsImageMode(BlendMode mode);
+
+// Fills a span list with image colors fetched per pixel (nearest or bilinear
+// filtering) and blended with the given mode. Destination contract is the
+// same as FillSolidSpans (premul ColorType::kRGBA; spans clamped to the
+// surface). Bit-exact with the legacy scalar brush for every supported
+// configuration; kSrc / kSrcOver only.
+//
+// Like FillSolidSpans, the caller must check IsEnabled() first. Returns
+// false (without touching pixels) when the configuration is unsupported or
+// the accelerator is unavailable (Validate fuse), in which case the caller
+// must use the legacy brush path.
+bool FillImageSpans(const ImageParams& params, BlendMode mode,
+                    uint8_t* dst_base, size_t row_bytes, int32_t width,
+                    int32_t height, const Span* spans, size_t span_count);
+
 }  // namespace sw_accel
 }  // namespace skity
 

@@ -58,6 +58,11 @@ HWY_EXPORT(GradientRunRadialSrcKernel);
 HWY_EXPORT(GradientRunLinearSrcOverKernel);
 HWY_EXPORT(GradientRunRadialSrcOverKernel);
 
+HWY_EXPORT(ImageRunNearestSrcKernel);
+HWY_EXPORT(ImageRunLinearSrcKernel);
+HWY_EXPORT(ImageRunNearestSrcOverKernel);
+HWY_EXPORT(ImageRunLinearSrcOverKernel);
+
 namespace {
 
 using RunKernelFn = void (*)(uint8_t*, size_t, uint32_t);
@@ -78,6 +83,21 @@ GradientKernelFn SelectGradientKernel(const GradientParams& params,
     default:
       return nullptr;
   }
+}
+
+using ImageKernelFn = void (*)(uint8_t*, const ImageParams*, int32_t, int32_t,
+                               size_t, uint32_t);
+
+ImageKernelFn SelectImageKernel(const ImageParams& params, BlendMode mode) {
+  if (mode == BlendMode::kSrc) {
+    return params.bilinear ? HWY_DYNAMIC_DISPATCH(ImageRunLinearSrcKernel)
+                           : HWY_DYNAMIC_DISPATCH(ImageRunNearestSrcKernel);
+  }
+  if (mode == BlendMode::kSrcOver) {
+    return params.bilinear ? HWY_DYNAMIC_DISPATCH(ImageRunLinearSrcOverKernel)
+                           : HWY_DYNAMIC_DISPATCH(ImageRunNearestSrcOverKernel);
+  }
+  return nullptr;
 }
 
 RunKernelFn SelectRunKernel(BlendMode mode) {
@@ -243,6 +263,218 @@ float ReferenceGradientT(const GradientParams& p, int32_t x, int32_t y) {
   return u;
 }
 
+// Scalar mirrors of the legacy image chain (PixmapBrush::CalculateColor via
+// BitmapSampler::GetColor, then the premul / coverage folds and the blend),
+// producing the premul memory word (0xAABBGGRR) for one destination pixel.
+// ValidateImages() checks the dispatched kernels against them.
+float ReferenceImageRemap(float t, int32_t tile_mode) {
+  if (tile_mode == static_cast<int32_t>(TileMode::kClamp)) {
+    return std::min(1.f, std::max(0.f, t));
+  } else if (tile_mode == static_cast<int32_t>(TileMode::kRepeat)) {
+    return t - std::floor(t);
+  } else if (tile_mode == static_cast<int32_t>(TileMode::kMirror)) {
+    float t1 = t - 1;
+    float t2 = t1 - 2 * std::floor(t1 * 0.5f) - 1;
+    return std::abs(t2);
+  }
+  return t;  // kDecal passes through; the decal early-out is a separate check.
+}
+
+uint32_t ReferenceImageColor(const ImageParams& p, int32_t x, int32_t y) {
+  const float fx = x + 0.5f;
+  const float fy = y + 0.5f;
+  // MapPoint: (fx * sx + fy * skx) + tx, left-associative.
+  const float u = (fx * p.m00 + fy * p.m01) + p.m02;
+  const float v = (fx * p.m10 + fy * p.m11) + p.m12;
+  // Decal early-out on the raw uv, before remapping (GetColor order).
+  if ((p.x_tile_mode == static_cast<int32_t>(TileMode::kDecal) &&
+       (u < 0.f || u >= 1.f)) ||
+      (p.y_tile_mode == static_cast<int32_t>(TileMode::kDecal) &&
+       (v < 0.f || v >= 1.f))) {
+    return 0;
+  }
+  const float uu = ReferenceImageRemap(u, p.x_tile_mode);
+  const float vv = ReferenceImageRemap(v, p.y_tile_mode);
+
+  const auto texel = [&p](int32_t ix, int32_t iy) {
+    uint32_t word;
+    memcpy(&word,
+           p.texels + static_cast<size_t>(iy) * p.tex_row_bytes +
+               static_cast<size_t>(ix) * 4,
+           4);
+    return word;
+  };
+
+  float ch[4] = {0.f, 0.f, 0.f, 0.f};
+  if (!p.bilinear) {
+    // Nearest: truncating uint32 convert (the value is non-negative after
+    // the remap), clamped to the last texel.
+    const uint32_t ix =
+        std::min<uint32_t>(static_cast<uint32_t>(uu * p.tex_width),
+                           static_cast<uint32_t>(p.tex_width - 1));
+    const uint32_t iy =
+        std::min<uint32_t>(static_cast<uint32_t>(vv * p.tex_height),
+                           static_cast<uint32_t>(p.tex_height - 1));
+    const uint32_t word =
+        texel(static_cast<int32_t>(ix), static_cast<int32_t>(iy));
+    for (int c = 0; c < 4; c++) {
+      ch[c] = static_cast<float>((word >> (c * 8)) & 0xff) / 255.f;
+    }
+  } else {
+    const float tx = uu * p.tex_width;
+    const float ty = vv * p.tex_height;
+    const float txm = tx - 0.5f;
+    const float tym = ty - 0.5f;
+    const float a = txm - std::floor(txm);
+    const float b = tym - std::floor(tym);
+    int32_t i0 = static_cast<int32_t>(std::floor(txm));
+    int32_t j0 = static_cast<int32_t>(std::floor(tym));
+    int32_t i1 = i0 + 1;
+    int32_t j1 = j0 + 1;
+    const auto wrap = [](int32_t& t0, int32_t& t1, int32_t dim) {
+      if (t0 < 0) {
+        t0 += dim;
+      }
+      if (t1 >= dim) {
+        t1 -= dim;
+      }
+    };
+    if (p.x_tile_mode == static_cast<int32_t>(TileMode::kRepeat)) {
+      wrap(i0, i1, p.tex_width);
+    }
+    if (p.y_tile_mode == static_cast<int32_t>(TileMode::kRepeat)) {
+      wrap(j0, j1, p.tex_height);
+    }
+    i0 = std::min(std::max(i0, 0), p.tex_width - 1);
+    i1 = std::min(std::max(i1, 0), p.tex_width - 1);
+    j0 = std::min(std::max(j0, 0), p.tex_height - 1);
+    j1 = std::min(std::max(j1, 0), p.tex_height - 1);
+    const uint32_t c00 = texel(i0, j0);
+    const uint32_t c10 = texel(i1, j0);
+    const uint32_t c01 = texel(i0, j1);
+    const uint32_t c11 = texel(i1, j1);
+    const float w00 = (1.f - a) * (1.f - b);
+    const float w10 = a * (1.f - b);
+    const float w01 = (1.f - a) * b;
+    const float w11 = a * b;
+    for (int c = 0; c < 4; c++) {
+      const float v00 = static_cast<float>((c00 >> (c * 8)) & 0xff) / 255.f;
+      const float v10 = static_cast<float>((c10 >> (c * 8)) & 0xff) / 255.f;
+      const float v01 = static_cast<float>((c01 >> (c * 8)) & 0xff) / 255.f;
+      const float v11 = static_cast<float>((c11 >> (c * 8)) & 0xff) / 255.f;
+      // SampleUnitLinear's combination in its exact expression order. The
+      // products stay in separate statements like the kernel's combine (see
+      // sw_accel_kernels.cc): contracting them into fma changes the
+      // last-bit rounding against the glm-shaped scalar sampler.
+      const float t0 = w00 * v00;
+      const float t1 = w10 * v10;
+      const float t2 = w01 * v01;
+      const float t3 = w11 * v11;
+      const float mixed = t0 + t1 + t2 + t3;
+      // Color4fToColor: clamp(v * 255, 0, 255), truncating cast.
+      ch[c] = static_cast<float>(
+          static_cast<uint32_t>(std::min(255.f, std::max(0.f, mixed * 255.f))));
+    }
+  }
+  uint32_t out[4];
+  for (int c = 0; c < 4; c++) {
+    out[c] = static_cast<uint32_t>(ch[c]);
+  }
+  // ColorToPMColor for unpremul textures: rounding premul of RGB by A.
+  if (!p.src_premul) {
+    for (int c = 0; c < 3; c++) {
+      out[c] = MulDiv255Round(out[c], out[3]);
+    }
+  }
+  return out[0] | (out[1] << 8) | (out[2] << 16) | (out[3] << 24);
+}
+
+// Coverage fold + real PorterDuffBlend over memory words, mirroring the
+// legacy BrushH -> BlendPixelH boundary.
+uint32_t ReferenceImageBlend(BlendMode mode, uint32_t src_mem, uint32_t dst_mem,
+                             uint8_t alpha) {
+  const uint32_t src_pm = PMColorSwapRB(src_mem);
+  const uint32_t src = alpha == 255 ? src_pm : AlphaMulQ(src_pm, alpha);
+  return PMColorSwapRB(PorterDuffBlend(src, PMColorSwapRB(dst_mem), mode));
+}
+
+void ValidateImages() {
+  // Image kernels against the scalar legacy chain: premul and unpremul
+  // textures, both filters, every tile-mode pair, both supported blend modes
+  // and two coverage levels. The probe rows sweep across and past the
+  // texture on both axes (negative uv, wrap seams, right/bottom edges) so
+  // every tap branch runs; the bit-exact fuse must not trip on rounding.
+  constexpr int32_t kTexW = 7;
+  constexpr int32_t kTexH = 5;
+  constexpr size_t kRowBytes = static_cast<size_t>(kTexW) * 4;
+  uint8_t texels[kTexH * kRowBytes];
+  const auto texel_at = [&](int32_t x, int32_t y) -> uint32_t& {
+    return *reinterpret_cast<uint32_t*>(texels +
+                                        static_cast<size_t>(y) * kRowBytes +
+                                        static_cast<size_t>(x) * 4);
+  };
+  for (int32_t y = 0; y < kTexH; y++) {
+    for (int32_t x = 0; x < kTexW; x++) {
+      // Premul-legal pseudo-random words (alpha in byte 3, RGB <= alpha).
+      const uint32_t hash = static_cast<uint32_t>(y * kTexW + x) * 2654435761u;
+      const uint32_t alpha = (hash >> 24) % 256;
+      const uint32_t r = hash % (alpha + 1);
+      const uint32_t g = (hash >> 8) % (alpha + 1);
+      const uint32_t b = (hash >> 16) % (alpha + 1);
+      texel_at(x, y) = r | (g << 8) | (b << 16) | (alpha << 24);
+    }
+  }
+
+  const int32_t tiles[] = {static_cast<int32_t>(TileMode::kClamp),
+                           static_cast<int32_t>(TileMode::kRepeat),
+                           static_cast<int32_t>(TileMode::kMirror),
+                           static_cast<int32_t>(TileMode::kDecal)};
+  for (int alpha_type = 0; alpha_type < 2; alpha_type++) {
+    for (int filter = 0; filter < 2; filter++) {
+      for (int t = 0; t < 4; t++) {
+        ImageParams p{};
+        p.texels = texels;
+        p.tex_row_bytes = kRowBytes;
+        p.tex_width = kTexW;
+        p.tex_height = kTexH;
+        p.m00 = 0.13f;
+        p.m01 = 0.007f;
+        p.m02 = -0.2f;
+        p.m10 = 0.21f;
+        p.m11 = 0.011f;
+        p.m12 = -0.35f;
+        p.x_tile_mode = tiles[t];
+        p.y_tile_mode = tiles[(t + 1) % 4];
+        p.bilinear = filter == 1;
+        p.src_premul = alpha_type == 1;
+        for (BlendMode mode : {BlendMode::kSrc, BlendMode::kSrcOver}) {
+          for (uint32_t alpha : {255u, 128u}) {
+            for (int32_t y : {0, 3, 17}) {
+              constexpr int32_t kCount = 37;
+              uint32_t dst[kCount];
+              uint32_t expect[kCount];
+              for (int32_t i = 0; i < kCount; i++) {
+                dst[i] = ColorToPMColor(
+                    static_cast<uint32_t>(i * 2654435761u + 0x40404040u));
+                expect[i] =
+                    ReferenceImageBlend(mode, ReferenceImageColor(p, i, y),
+                                        dst[i], static_cast<uint8_t>(alpha));
+              }
+              ImageKernelFn kernel = SelectImageKernel(p, mode);
+              kernel(reinterpret_cast<uint8_t*>(dst), &p, 0, y, kCount, alpha);
+              for (int32_t i = 0; i < kCount; i++) {
+                if (dst[i] != expect[i]) {
+                  return;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 std::once_flag g_validate_once;
 bool g_available = false;
 
@@ -319,6 +551,7 @@ void ValidateOnce() {
     }
   }
   ValidateGradients();
+  ValidateImages();
   g_available = true;
 }
 
@@ -637,12 +870,74 @@ bool FillGradientSpans(const GradientParams& params, BlendMode mode,
     if (len <= 0) {
       continue;
     }
-    // BrushH folds the span cover with AlphaMulQ (cover & global_alpha,
-    // and the gradient brushes always pass global alpha 1.0).
+    // BrushH folds the span cover with MulDiv255Round against the brush's
+    // global alpha; the gradient brushes always pass global alpha 1.0, so
+    // the folded value is the raw cover.
     const uint32_t cover = static_cast<uint32_t>(spans[i].cover) & 0xffu;
     kernel(dst_base + static_cast<size_t>(y) * row_bytes +
                static_cast<size_t>(x) * 4,
            &params, x, y, static_cast<size_t>(len), cover);
+  }
+  return true;
+}
+
+bool SupportsImageMode(BlendMode mode) {
+  return mode == BlendMode::kSrc || mode == BlendMode::kSrcOver;
+}
+
+bool FillImageSpans(const ImageParams& params, BlendMode mode,
+                    uint8_t* dst_base, size_t row_bytes, int32_t width,
+                    int32_t height, const Span* spans, size_t span_count) {
+  // Same contract as FillSolidSpans: the caller checked IsEnabled().
+  if (!Available()) {
+    return false;
+  }
+  ImageKernelFn kernel = SelectImageKernel(params, mode);
+  if (kernel == nullptr) {
+    return false;
+  }
+  // The caller (PixmapBrush) validates its configuration before building the
+  // params; re-check the invariants the kernel itself relies on (the u32
+  // offset math needs the texture to fit, and non-finite matrix entries
+  // would poison the uv lanes).
+  if (params.texels == nullptr || params.tex_width < 1 ||
+      params.tex_height < 1 ||
+      params.tex_row_bytes < static_cast<size_t>(params.tex_width) * 4 ||
+      params.tex_row_bytes * static_cast<size_t>(params.tex_height) >
+          0xffffffffull) {
+    return false;
+  }
+  const float matrix[6] = {params.m00, params.m01, params.m02,
+                           params.m10, params.m11, params.m12};
+  for (float entry : matrix) {
+    if (!std::isfinite(entry)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < span_count; i++) {
+    int32_t x = spans[i].x;
+    int32_t y = spans[i].y;
+    int32_t len = spans[i].len;
+    if (y < 0 || y >= height || x >= width || len <= 0) {
+      continue;
+    }
+    if (x < 0) {
+      len += x;
+      x = 0;
+    }
+    if (x + len > width) {
+      len = width - x;
+    }
+    if (len <= 0) {
+      continue;
+    }
+    // Brush() folds the span cover with the brush's global alpha
+    // (MulDiv255Round), matching the fixed scalar path.
+    const uint32_t cover = static_cast<uint32_t>(spans[i].cover) & 0xffu;
+    const uint32_t alpha = MulDiv255Round(cover, params.global_alpha);
+    kernel(dst_base + static_cast<size_t>(y) * row_bytes +
+               static_cast<size_t>(x) * 4,
+           &params, x, y, static_cast<size_t>(len), alpha);
   }
   return true;
 }

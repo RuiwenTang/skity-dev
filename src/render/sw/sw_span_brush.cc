@@ -32,7 +32,6 @@ float RemapFloatTile(float t, TileMode tile_mode) {
   }
   return t;
 }
-
 }  // namespace
 
 void SWSpanBrush::Brush() {
@@ -683,7 +682,49 @@ PixmapBrush::PixmapBrush(std::vector<Span> const& spans, Bitmap* bitmap,
       x_tile_mode_(x_tile_mode),
       y_tile_mode_(y_tile_mode),
       bitmap_sampler_(*texture_.get(), sampling, x_tile_mode, y_tile_mode,
-                      target_space) {}
+                      target_space) {
+#ifdef SKITY_SW_ACCEL
+  // Accelerated configurations: kRGBA textures without a color transform,
+  // nearest/linear filtering, kSrc/kSrcOver, a finite transform and a
+  // texture whose byte offsets fit the kernel's u32 math. Cubic sampling,
+  // color filters, other blend modes, exotic texture formats and
+  // degenerate textures keep the scalar sampler path.
+  const bool offsets_fit =
+      texture_->RowBytes() >= static_cast<size_t>(texture_->Width()) * 4 &&
+      texture_->RowBytes() * texture_->Height() <= 0xffffffffull;
+  const float matrix[6] = {
+      points_to_unit.GetScaleX(),     points_to_unit.GetSkewX(),
+      points_to_unit.GetTranslateX(), points_to_unit.GetSkewY(),
+      points_to_unit.GetScaleY(),     points_to_unit.GetTranslateY()};
+  bool finite = true;
+  for (float entry : matrix) {
+    finite = finite && std::isfinite(entry);
+  }
+  accel_ok_ = color_filter == nullptr && sw_accel::SupportsImageMode(blend) &&
+              texture_->Width() >= 1 && texture_->Height() >= 1 &&
+              offsets_fit && finite && !sampling.UseCubic() &&
+              texture_->GetColorType() == ColorType::kRGBA &&
+              bitmap_sampler_.ColorTransformIsNoop();
+  if (accel_ok_) {
+    accel_params_.texels = texture_->GetPixelAddr();
+    accel_params_.tex_row_bytes = texture_->RowBytes();
+    accel_params_.tex_width = static_cast<int32_t>(texture_->Width());
+    accel_params_.tex_height = static_cast<int32_t>(texture_->Height());
+    accel_params_.m00 = matrix[0];
+    accel_params_.m01 = matrix[1];
+    accel_params_.m02 = matrix[2];
+    accel_params_.m10 = matrix[3];
+    accel_params_.m11 = matrix[4];
+    accel_params_.m12 = matrix[5];
+    accel_params_.x_tile_mode = static_cast<int32_t>(x_tile_mode);
+    accel_params_.y_tile_mode = static_cast<int32_t>(y_tile_mode);
+    accel_params_.bilinear = sampling.filter == FilterMode::kLinear;
+    accel_params_.src_premul =
+        texture_->GetAlphaType() == AlphaType::kPremul_AlphaType;
+    accel_params_.global_alpha = static_cast<uint8_t>(255 * global_alpha);
+  }
+#endif
+}
 
 Color PixmapBrush::CalculateColor(int32_t x, int32_t y) {
   SKITY_TRACE_EVENT(PixmapBrush_CalculateColor);
@@ -695,6 +736,26 @@ Color PixmapBrush::CalculateColor(int32_t x, int32_t y) {
   }
 
   return color;
+}
+
+void PixmapBrush::Brush() {
+#ifdef SKITY_SW_ACCEL
+  // The whole span list goes through the SIMD fetch + blend kernels in one
+  // pass when the draw matches the accelerated configurations built by the
+  // constructor; the kernel reproduces the scalar chain bit-exactly.
+  if (accel_ok_ && sw_accel::IsEnabled() && sw_accel::Available()) {
+    Bitmap* bitmap = CurrentBitmap();
+    if (sw_accel::FillImageSpans(accel_params_, GetBlendMode(),
+                                 bitmap->GetPixelAddr(), bitmap->RowBytes(),
+                                 static_cast<int32_t>(bitmap->Width()),
+                                 static_cast<int32_t>(bitmap->Height()),
+                                 GetSpans(), GetSpanSize())) {
+      return;
+    }
+    // Disabled or unavailable at draw time; nothing has been written yet.
+  }
+#endif
+  SWSpanBrush::Brush();
 }
 
 }  // namespace skity
