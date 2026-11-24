@@ -18,6 +18,6 @@ void draw_linear_gradient_example(skity::Canvas* canvas);
 void draw_even_odd_fill(skity::Canvas* canvas);
 
 void draw_canvas(skity::Canvas* canvas);
-}
+}  // namespace skity::example::basic
 
 #endif  // EXAMPLE_BASIC_EXAMPLE_HPP

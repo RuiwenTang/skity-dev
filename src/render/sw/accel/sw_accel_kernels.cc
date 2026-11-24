@@ -11,11 +11,10 @@
 // are expressed against the full-width tags and adapt automatically; shuffle
 // control is built arithmetically from Iota instead of 16-byte tables.
 
+#include <hwy/highway.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-
-#include <hwy/highway.h>
 
 #include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
@@ -78,9 +77,8 @@ static inline void FillSrcBytes(uint8_t* src_bytes, uint32_t src_pm,
 // lanes. Used for alpha (byte 3) and for the gradient LUT fraction (byte 0).
 template <class D8, class V8>
 static inline V8 BroadcastLaneByte(D8 d8, V8 px, uint8_t lane_byte) {
-  const auto idx =
-      hn::Add(hn::And(hn::Iota(d8, 0), hn::Set(d8, uint8_t{0xFC})),
-              hn::Set(d8, lane_byte));
+  const auto idx = hn::Add(hn::And(hn::Iota(d8, 0), hn::Set(d8, uint8_t{0xFC})),
+                           hn::Set(d8, lane_byte));
   return hn::TableLookupBytes(px, idx);
 }
 
@@ -153,10 +151,9 @@ static inline V16 TermScale(D16 d16, V16 da16, uint32_t sa) {
 template <BlendMode MODE, ScaleKind SRC, ScaleKind DST>
 static void SolidRunCoeffKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                                 uint32_t src_pm) {
-  constexpr bool kNeedsDstA = SRC == ScaleKind::kInvDstA ||
-                              SRC == ScaleKind::kDstA ||
-                              DST == ScaleKind::kInvDstA ||
-                              DST == ScaleKind::kDstA;
+  constexpr bool kNeedsDstA =
+      SRC == ScaleKind::kInvDstA || SRC == ScaleKind::kDstA ||
+      DST == ScaleKind::kInvDstA || DST == ScaleKind::kDstA;
 
   alignas(64) uint8_t src_bytes[64];
 
@@ -190,29 +187,29 @@ static void SolidRunCoeffKernel(uint8_t* HWY_RESTRICT dst, size_t count,
       const auto a_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, a8));
       const auto r_lo = term_add(s_lo, d_lo, a_lo);
       const auto r_hi = term_add(s_hi, d_hi, a_hi);
-      hn::StoreU(hn::Combine(d8, hn::TruncateTo(d8h, r_hi),
-                             hn::TruncateTo(d8h, r_lo)),
-                 d8, dst + px * 4);
+      hn::StoreU(
+          hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo)),
+          d8, dst + px * 4);
     } else {
       const auto r_lo = term_add(s_lo, d_lo, hn::Zero(d16));
       const auto r_hi = term_add(s_hi, d_hi, hn::Zero(d16));
-      hn::StoreU(hn::Combine(d8, hn::TruncateTo(d8h, r_hi),
-                             hn::TruncateTo(d8h, r_lo)),
-                 d8, dst + px * 4);
+      hn::StoreU(
+          hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo)),
+          d8, dst + px * 4);
     }
   }
   for (; px < count; px++) {
     // Memory words are 0xAABBGGRR; blend in the PMColor convention.
-    dst32[px] = PMColorSwapRB(
-        PorterDuffBlend(src_pm, PMColorSwapRB(dst32[px]), MODE));
+    dst32[px] =
+        PMColorSwapRB(PorterDuffBlend(src_pm, PMColorSwapRB(dst32[px]), MODE));
   }
 }
 
 // kSrcOver: r = s + (1 - sa) * d
 void SolidRunSrcOverKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                            uint32_t src_pm) {
-  SolidRunCoeffKernel<BlendMode::kSrcOver, ScaleKind::kOne, ScaleKind::kInvSrcA>(
-      dst, count, src_pm);
+  SolidRunCoeffKernel<BlendMode::kSrcOver, ScaleKind::kOne,
+                      ScaleKind::kInvSrcA>(dst, count, src_pm);
 }
 
 // kDstOver: r = d + (1 - da) * s
@@ -292,15 +289,13 @@ void SolidRunPlusKernel(uint8_t* HWY_RESTRICT dst, size_t count,
   size_t px = 0;
   for (; px + vl / 4 <= count; px += vl / 4) {
     const auto d8v = hn::LoadU(d8, dst + px * 4);
-    const auto r_lo =
-        hn::Min(hn::Add(s_lo, hn::PromoteTo(d16, hn::LowerHalf(d8h, d8v))),
-                k255);
-    const auto r_hi =
-        hn::Min(hn::Add(s_hi, hn::PromoteTo(d16, hn::UpperHalf(d8h, d8v))),
-                k255);
-    hn::StoreU(hn::Combine(d8, hn::TruncateTo(d8h, r_hi),
-                           hn::TruncateTo(d8h, r_lo)),
-               d8, dst + px * 4);
+    const auto r_lo = hn::Min(
+        hn::Add(s_lo, hn::PromoteTo(d16, hn::LowerHalf(d8h, d8v))), k255);
+    const auto r_hi = hn::Min(
+        hn::Add(s_hi, hn::PromoteTo(d16, hn::UpperHalf(d8h, d8v))), k255);
+    hn::StoreU(
+        hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo)),
+        d8, dst + px * 4);
   }
   for (; px < count; px++) {
     dst32[px] = PMColorSwapRB(
@@ -332,13 +327,13 @@ void SolidRunModulateKernel(uint8_t* HWY_RESTRICT dst, size_t count,
         RoundMul(s_lo, hn::PromoteTo(d16, hn::LowerHalf(d8h, d8v)));
     const auto r_hi =
         RoundMul(s_hi, hn::PromoteTo(d16, hn::UpperHalf(d8h, d8v)));
-    hn::StoreU(hn::Combine(d8, hn::TruncateTo(d8h, r_hi),
-                           hn::TruncateTo(d8h, r_lo)),
-               d8, dst + px * 4);
+    hn::StoreU(
+        hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo)),
+        d8, dst + px * 4);
   }
   for (; px < count; px++) {
-    dst32[px] = PMColorSwapRB(PorterDuffBlend(
-        src_pm, PMColorSwapRB(dst32[px]), BlendMode::kModulate));
+    dst32[px] = PMColorSwapRB(PorterDuffBlend(src_pm, PMColorSwapRB(dst32[px]),
+                                              BlendMode::kModulate));
   }
 }
 
@@ -366,9 +361,9 @@ void SolidRunScreenKernel(uint8_t* HWY_RESTRICT dst, size_t count,
     const auto d_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, d8v));
     const auto r_lo = hn::Sub(hn::Add(s_lo, d_lo), RoundMul(s_lo, d_lo));
     const auto r_hi = hn::Sub(hn::Add(s_hi, d_hi), RoundMul(s_hi, d_hi));
-    hn::StoreU(hn::Combine(d8, hn::TruncateTo(d8h, r_hi),
-                           hn::TruncateTo(d8h, r_lo)),
-               d8, dst + px * 4);
+    hn::StoreU(
+        hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo)),
+        d8, dst + px * 4);
   }
   for (; px < count; px++) {
     dst32[px] = PMColorSwapRB(
@@ -394,6 +389,10 @@ static inline F AdvancedComponent(F sf, F saf, F df, F daf) {
   const F one = hn::Set(f32, 1.0f);
   const F two = hn::Set(f32, 2.0f);
   const F kMinNormalHalf = hn::Set(f32, 0.0001f);
+  // Hoisted so the else-if condition stays on one line (cpplint's brace
+  // heuristic misreads a line-wrapped else-if condition as braceless).
+  constexpr bool kIsDarkenOrLighten =
+      MODE == BlendMode::kDarken || MODE == BlendMode::kLighten;
   if constexpr (MODE == BlendMode::kOverlay || MODE == BlendMode::kHardLight) {
     // HardLight is Overlay with the operands swapped.
     const F sc = MODE == BlendMode::kHardLight ? df : sf;
@@ -401,15 +400,14 @@ static inline F AdvancedComponent(F sf, F saf, F df, F daf) {
     const F dc = MODE == BlendMode::kHardLight ? sf : df;
     const F da = MODE == BlendMode::kHardLight ? saf : daf;
     const F mul2 = hn::Mul(two, dc);
-    const F base = hn::IfThenElse(hn::Le(mul2, da), hn::Mul(two, hn::Mul(sc, dc)),
-                                  hn::Sub(hn::Mul(sa, da),
-                                          hn::Mul(two, hn::Mul(hn::Sub(da, dc),
-                                                               hn::Sub(sa, sc)))));
+    const F base = hn::IfThenElse(
+        hn::Le(mul2, da), hn::Mul(two, hn::Mul(sc, dc)),
+        hn::Sub(hn::Mul(sa, da),
+                hn::Mul(two, hn::Mul(hn::Sub(da, dc), hn::Sub(sa, sc)))));
     // extra = dst * (1 - sa) + src * (1 - da), alpha zeroed.
     return hn::Add(base, hn::Add(hn::Mul(df, hn::Sub(one, saf)),
                                  hn::Mul(sf, hn::Sub(one, daf))));
-  } else if constexpr (MODE == BlendMode::kDarken ||
-                       MODE == BlendMode::kLighten) {
+  } else if constexpr (kIsDarkenOrLighten) {
     const F over = hn::Add(sf, hn::Mul(hn::Sub(one, saf), df));
     const F other = hn::Add(hn::Mul(hn::Sub(one, daf), sf), df);
     if constexpr (MODE == BlendMode::kDarken) {
@@ -419,12 +417,11 @@ static inline F AdvancedComponent(F sf, F saf, F df, F daf) {
     }
   } else if constexpr (MODE == BlendMode::kColorDodge) {
     const F dx_scale = hn::IfThenElse(hn::Eq(df, zero), zero, one);
-    const F guarded = hn::IfThenElse(
-        hn::Ge(hn::Abs(hn::Sub(saf, sf)), kMinNormalHalf),
-        hn::Div(hn::Mul(df, saf), hn::Sub(saf, sf)), daf);
+    const F guarded =
+        hn::IfThenElse(hn::Ge(hn::Abs(hn::Sub(saf, sf)), kMinNormalHalf),
+                       hn::Div(hn::Mul(df, saf), hn::Sub(saf, sf)), daf);
     const F delta = hn::Mul(dx_scale, hn::Min(daf, guarded));
-    return hn::Add(hn::Add(hn::Mul(delta, saf),
-                           hn::Mul(sf, hn::Sub(one, daf))),
+    return hn::Add(hn::Add(hn::Mul(delta, saf), hn::Mul(sf, hn::Sub(one, daf))),
                    hn::Mul(df, hn::Sub(one, saf)));
   } else if constexpr (MODE == BlendMode::kColorBurn) {
     const F dy_term = hn::IfThenElse(hn::Eq(daf, df), daf, zero);
@@ -432,8 +429,7 @@ static inline F AdvancedComponent(F sf, F saf, F df, F daf) {
         hn::Ge(hn::Abs(sf), kMinNormalHalf),
         hn::Sub(daf, hn::Min(daf, hn::Div(hn::Mul(hn::Sub(daf, df), saf), sf))),
         dy_term);
-    return hn::Add(hn::Add(hn::Mul(delta, saf),
-                           hn::Mul(sf, hn::Sub(one, daf))),
+    return hn::Add(hn::Add(hn::Mul(delta, saf), hn::Mul(sf, hn::Sub(one, daf))),
                    hn::Mul(df, hn::Sub(one, saf)));
   } else if constexpr (MODE == BlendMode::kSoftLight) {
     // sa - 2*sc (reused) and -sa + 2*sc + 1, mirrored left-to-right from the
@@ -451,25 +447,23 @@ static inline F AdvancedComponent(F sf, F saf, F df, F daf) {
     const F d_cu = hn::Mul(d_sq, df);
     const F da_sq = hn::Mul(daf, daf);
     const F da_cu = hn::Mul(da_sq, daf);
-    const F inner3 =
-        hn::Sub(hn::Sub(hn::Mul(hn::Set(f32, 3.f), saf),
-                        hn::Mul(hn::Set(f32, 6.f), sf)),
-                one);
+    const F inner3 = hn::Sub(hn::Sub(hn::Mul(hn::Set(f32, 3.f), saf),
+                                     hn::Mul(hn::Set(f32, 6.f), sf)),
+                             one);
     const F t_a = hn::Mul(da_sq, hn::Sub(sf, hn::Mul(df, inner3)));
-    const F t_b = hn::Mul(hn::Mul(hn::Set(f32, 12.f), daf),
-                          hn::Mul(d_sq, sm2));
+    const F t_b = hn::Mul(hn::Mul(hn::Set(f32, 12.f), daf), hn::Mul(d_sq, sm2));
     const F t_c = hn::Mul(hn::Mul(hn::Set(f32, 16.f), d_cu), sm2);
     const F t_d = hn::Mul(da_cu, sf);
-    const F branch_b = hn::Div(hn::Sub(hn::Sub(hn::Add(t_a, t_b), t_c), t_d),
-                               da_sq);
+    const F branch_b =
+        hn::Div(hn::Sub(hn::Sub(hn::Add(t_a, t_b), t_c), t_d), da_sq);
     const F branch_c =
         hn::Sub(hn::Sub(hn::Add(hn::Mul(df, hn::Add(sm2, one)), sf),
                         hn::Mul(hn::Sqrt(hn::Mul(daf, df)), sm2)),
                 hn::Mul(daf, sf));
-    F res = hn::IfThenElse(hn::Le(hn::Mul(two, sf), saf), branch_a,
-                           hn::IfThenElse(
-                               hn::Le(hn::Mul(hn::Set(f32, 4.f), df), daf),
-                               branch_b, branch_c));
+    F res = hn::IfThenElse(
+        hn::Le(hn::Mul(two, sf), saf), branch_a,
+        hn::IfThenElse(hn::Le(hn::Mul(hn::Set(f32, 4.f), df), daf), branch_b,
+                       branch_c));
     // dst.a == 0 -> the whole result is src.
     res = hn::IfThenElse(hn::Eq(daf, zero), sf, res);
     return res;
@@ -479,9 +473,9 @@ static inline F AdvancedComponent(F sf, F saf, F df, F daf) {
   } else if constexpr (MODE == BlendMode::kExclusion) {
     return hn::Sub(hn::Add(df, sf), hn::Mul(two, hn::Mul(df, sf)));
   } else if constexpr (MODE == BlendMode::kMultiply) {
-    return hn::Add(hn::Add(hn::Mul(hn::Sub(one, saf), df),
-                           hn::Mul(hn::Sub(one, daf), sf)),
-                   hn::Mul(sf, df));
+    return hn::Add(
+        hn::Add(hn::Mul(hn::Sub(one, saf), df), hn::Mul(hn::Sub(one, daf), sf)),
+        hn::Mul(sf, df));
   }
 }
 
@@ -512,8 +506,9 @@ static void AdvancedRunKernelT(uint8_t* HWY_RESTRICT dst, size_t count,
   const auto zero32 = hn::Zero(du32);
 
   // Lane mask selecting each pixel's alpha byte.
-  const auto alpha_lanes = hn::Eq(hn::And(hn::Iota(df8, 0), hn::Set(df8, uint8_t{3})),
-                                  hn::Set(df8, uint8_t{3}));
+  const auto alpha_lanes =
+      hn::Eq(hn::And(hn::Iota(df8, 0), hn::Set(df8, uint8_t{3})),
+             hn::Set(df8, uint8_t{3}));
 
   uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst);
   size_t px = 0;
@@ -523,14 +518,14 @@ static void AdvancedRunKernelT(uint8_t* HWY_RESTRICT dst, size_t count,
       const auto d8c = hn::LoadU(df8, dst + px * 4 + off);
       const auto sa8 = BroadcastLaneByte(df8, s8, 3);
       const auto da8 = BroadcastLaneByte(df8, d8c, 3);
-      const auto sf = hn::Div(
-          hn::ConvertTo(df32, hn::PromoteTo(du32, s8)), kInv255);
-      const auto df = hn::Div(
-          hn::ConvertTo(df32, hn::PromoteTo(du32, d8c)), kInv255);
-      const auto saf = hn::Div(
-          hn::ConvertTo(df32, hn::PromoteTo(du32, sa8)), kInv255);
-      const auto daf = hn::Div(
-          hn::ConvertTo(df32, hn::PromoteTo(du32, da8)), kInv255);
+      const auto sf =
+          hn::Div(hn::ConvertTo(df32, hn::PromoteTo(du32, s8)), kInv255);
+      const auto df =
+          hn::Div(hn::ConvertTo(df32, hn::PromoteTo(du32, d8c)), kInv255);
+      const auto saf =
+          hn::Div(hn::ConvertTo(df32, hn::PromoteTo(du32, sa8)), kInv255);
+      const auto daf =
+          hn::Div(hn::ConvertTo(df32, hn::PromoteTo(du32, da8)), kInv255);
 
       const auto rf = AdvancedComponent<MODE>(sf, saf, df, daf);
       auto af = hn::Add(saf, hn::Mul(hn::Sub(kOne, saf), daf));
@@ -544,15 +539,14 @@ static void AdvancedRunKernelT(uint8_t* HWY_RESTRICT dst, size_t count,
       };
       const auto qc = quantize(rf);
       const auto qa = quantize(af);
-      const auto out8 =
-          hn::IfThenElse(alpha_lanes, hn::TruncateTo(df8, qa),
-                         hn::TruncateTo(df8, qc));
+      const auto out8 = hn::IfThenElse(alpha_lanes, hn::TruncateTo(df8, qa),
+                                       hn::TruncateTo(df8, qc));
       hn::StoreU(out8, df8, dst + px * 4 + off);
     }
   }
   for (; px < count; px++) {
-    dst32[px] = PMColorSwapRB(
-        PorterDuffBlend(src_pm, PMColorSwapRB(dst32[px]), MODE));
+    dst32[px] =
+        PMColorSwapRB(PorterDuffBlend(src_pm, PMColorSwapRB(dst32[px]), MODE));
   }
 }
 
@@ -615,7 +609,7 @@ void SolidRunExclusionKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 }
 
 void SolidRunMultiplyKernel(uint8_t* HWY_RESTRICT dst, size_t count,
-                           uint32_t src_pm) {
+                            uint32_t src_pm) {
   AdvancedRunKernelT<BlendMode::kMultiply>(dst, count, src_pm);
 }
 
@@ -689,8 +683,7 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
   const auto kEps = hn::Set(f32, 1.0f / (1 << 12));  // skity kNearlyZero
 
   const bool decal = p.tile_mode == static_cast<int32_t>(TileMode::kDecal);
-  const bool clamp_tile =
-      p.tile_mode == static_cast<int32_t>(TileMode::kClamp);
+  const bool clamp_tile = p.tile_mode == static_cast<int32_t>(TileMode::kClamp);
   const bool repeat_tile =
       p.tile_mode == static_cast<int32_t>(TileMode::kRepeat);
   // kMirror and kDecal keep t through RemapFloatTile's fall-through.
@@ -709,9 +702,8 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
   for (; px < count; px += group) {
     // ---- t -----------------------------------------------------------
     const auto fx = hn::Add(
-        hn::ConvertTo(f32,
-                      hn::Add(hn::Set(i32, x + static_cast<int32_t>(px)),
-                              hn::Iota(i32, 0))),
+        hn::ConvertTo(f32, hn::Add(hn::Set(i32, x + static_cast<int32_t>(px)),
+                                   hn::Iota(i32, 0))),
         k05);
     auto t = hn::Add(hn::Add(hn::Mul(fx, m00), hn::Mul(fy, m01)), m02);
     if constexpr (kRadial) {
@@ -738,14 +730,13 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
 
     // ---- LUT fetch + interpolation -------------------------------------
     const auto u = hn::Mul(t, lut_scale);
-    const auto i0 = hn::Min(
-        hn::Max(hn::ConvertTo(u32, u), hn::Zero(u32)), lut_max);
+    const auto i0 =
+        hn::Min(hn::Max(hn::ConvertTo(u32, u), hn::Zero(u32)), lut_max);
     const auto frac_f = hn::Sub(u, hn::ConvertTo(f32, i0));
     // Rounded weight: +0.5 before the truncating convert keeps the lerp
     // error below 1 instead of letting it accumulate with the grid error.
     const auto frac8 = hn::Min(
-        hn::ConvertTo(u32, hn::Add(hn::Mul(frac_f, k256f), kHalf)),
-        k255u);
+        hn::ConvertTo(u32, hn::Add(hn::Mul(frac_f, k256f), kHalf)), k255u);
     alignas(64) uint32_t i0a[16];
     hn::Store(i0, u32, i0a);
 
@@ -764,32 +755,30 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
     // Signed per-channel deltas (two's complement in the u16 lanes): the
     // low bits of the wrapping multiply are exact for negative deltas too,
     // and the arithmetic shift below rounds like MulDiv255Round.
-    const auto d16lo = hn::Sub(hn::PromoteTo(d16, hn::LowerHalf(d8h, c1_8)),
-                               c16lo);
-    const auto d16hi = hn::Sub(hn::PromoteTo(d16, hn::UpperHalf(d8h, c1_8)),
-                               c16hi);
-    const auto scaled_lo = hn::Add(
-        hn::Mul(d16lo, hn::PromoteTo(d16, hn::LowerHalf(d8h, frac8b))),
-        kRound128);
-    const auto scaled_hi = hn::Add(
-        hn::Mul(d16hi, hn::PromoteTo(d16, hn::UpperHalf(d8h, frac8b))),
-        kRound128);
-    auto w16lo = hn::Add(c16lo, hn::BitCast(
-                                    d16, hn::ShiftRight<8>(
-                                             hn::BitCast(di16, scaled_lo))));
-    auto w16hi = hn::Add(c16hi, hn::BitCast(
-                                    d16, hn::ShiftRight<8>(
-                                             hn::BitCast(di16, scaled_hi))));
+    const auto d16lo =
+        hn::Sub(hn::PromoteTo(d16, hn::LowerHalf(d8h, c1_8)), c16lo);
+    const auto d16hi =
+        hn::Sub(hn::PromoteTo(d16, hn::UpperHalf(d8h, c1_8)), c16hi);
+    const auto scaled_lo =
+        hn::Add(hn::Mul(d16lo, hn::PromoteTo(d16, hn::LowerHalf(d8h, frac8b))),
+                kRound128);
+    const auto scaled_hi =
+        hn::Add(hn::Mul(d16hi, hn::PromoteTo(d16, hn::UpperHalf(d8h, frac8b))),
+                kRound128);
+    auto w16lo = hn::Add(
+        c16lo,
+        hn::BitCast(d16, hn::ShiftRight<8>(hn::BitCast(di16, scaled_lo))));
+    auto w16hi = hn::Add(
+        c16hi,
+        hn::BitCast(d16, hn::ShiftRight<8>(hn::BitCast(di16, scaled_hi))));
     if (cover != 255) {
       // BrushH coverage fold: AlphaMulQ, truncating per channel.
       w16lo = ScaleMul(w16lo, cover16);
       w16hi = ScaleMul(w16hi, cover16);
     }
-    auto word = hn::BitCast(
-        u32, hn::Combine(d8, hn::TruncateTo(d8h, w16hi),
-                         hn::TruncateTo(d8h, w16lo)));
-    word = hn::IfThenElse(hn::RebindMask(u32, decal_mask), hn::Zero(u32),
-                          word);
+    auto word = hn::BitCast(u32, hn::Combine(d8, hn::TruncateTo(d8h, w16hi),
+                                             hn::TruncateTo(d8h, w16lo)));
+    word = hn::IfThenElse(hn::RebindMask(u32, decal_mask), hn::Zero(u32), word);
 
     const size_t rem = count - px;
     if constexpr (!kBlendSrcOver) {
@@ -820,8 +809,8 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
           hn::Add(s_lo, hn::ShiftRight<8>(hn::Mul(d_lo, scale_lo)));
       const auto r_hi =
           hn::Add(s_hi, hn::ShiftRight<8>(hn::Mul(d_hi, scale_hi)));
-      const auto out8 = hn::Combine(d8, hn::TruncateTo(d8h, r_hi),
-                                    hn::TruncateTo(d8h, r_lo));
+      const auto out8 =
+          hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo));
       if (rem >= group) {
         hn::StoreU(out8, d8, dst + px * 4);
       } else {

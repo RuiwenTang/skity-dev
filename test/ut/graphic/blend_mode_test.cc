@@ -28,9 +28,7 @@ uint32_t RandomPMColor(uint32_t& state) {
   return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
-bool BlendEq(uint32_t x, uint32_t y) {
-  return x == y;
-}
+bool BlendEq(uint32_t x, uint32_t y) { return x == y; }
 
 }  // namespace
 
@@ -82,18 +80,16 @@ TEST(AdvancedBlend, AlphaFollowsSourceOver) {
       const uint32_t da = ColorGetA(d);
       // sa + (1 - sa/255) * da, quantized like the implementation:
       // floor((sa + (255 - sa) * da / 255) * ... in f32 domain.
-      const float expected_f =
-          sa / 255.f + (1.f - sa / 255.f) * (da / 255.f);
+      const float expected_f = sa / 255.f + (1.f - sa / 255.f) * (da / 255.f);
       const uint32_t expected = static_cast<uint32_t>(
           std::min(1.f, std::max(0.f, expected_f)) * 255.f + 0.5f);
       EXPECT_EQ(expected, ColorGetA(out))
           << "mode " << skity::BlendMode_Name(m) << " s " << s << " d " << d;
     }
     // HSL family: alpha = sa + da - sa*da.
-    for (skity::BlendMode m : {skity::BlendMode::kHue,
-                               skity::BlendMode::kSaturation,
-                               skity::BlendMode::kColor,
-                               skity::BlendMode::kLuminosity}) {
+    for (skity::BlendMode m :
+         {skity::BlendMode::kHue, skity::BlendMode::kSaturation,
+          skity::BlendMode::kColor, skity::BlendMode::kLuminosity}) {
       const uint32_t out = skity::PorterDuffBlend(s, d, m);
       const uint32_t sa = ColorGetA(s);
       const uint32_t da = ColorGetA(d);
@@ -113,20 +109,19 @@ TEST(AdvancedBlend, AlphaFollowsSourceOver) {
 TEST(AdvancedBlend, OpaqueInputsStayOpaqueAndBounded) {
   uint32_t state = 0x51ed270bu;
   const skity::BlendMode advanced[] = {
-      skity::BlendMode::kOverlay,     skity::BlendMode::kDarken,
-      skity::BlendMode::kLighten,     skity::BlendMode::kColorDodge,
-      skity::BlendMode::kColorBurn,   skity::BlendMode::kHardLight,
-      skity::BlendMode::kSoftLight,   skity::BlendMode::kDifference,
-      skity::BlendMode::kExclusion,   skity::BlendMode::kMultiply,
-      skity::BlendMode::kHue,         skity::BlendMode::kSaturation,
-      skity::BlendMode::kColor,       skity::BlendMode::kLuminosity};
+      skity::BlendMode::kOverlay,   skity::BlendMode::kDarken,
+      skity::BlendMode::kLighten,   skity::BlendMode::kColorDodge,
+      skity::BlendMode::kColorBurn, skity::BlendMode::kHardLight,
+      skity::BlendMode::kSoftLight, skity::BlendMode::kDifference,
+      skity::BlendMode::kExclusion, skity::BlendMode::kMultiply,
+      skity::BlendMode::kHue,       skity::BlendMode::kSaturation,
+      skity::BlendMode::kColor,     skity::BlendMode::kLuminosity};
   for (int i = 0; i < 2000; i++) {
     const uint32_t s = 0xff000000u | (NextRandom(state) & 0xffffffu);
     const uint32_t d = 0xff000000u | (NextRandom(state) & 0xffffffu);
     for (skity::BlendMode m : advanced) {
       const uint32_t out = skity::PorterDuffBlend(s, d, m);
-      ASSERT_EQ(255u, ColorGetA(out))
-          << "mode " << skity::BlendMode_Name(m);
+      ASSERT_EQ(255u, ColorGetA(out)) << "mode " << skity::BlendMode_Name(m);
       ASSERT_LE(ColorGetR(out), 255u);
       ASSERT_LE(ColorGetG(out), 255u);
       ASSERT_LE(ColorGetB(out), 255u);
@@ -142,43 +137,42 @@ TEST(AdvancedBlend, OpaqueSpotValues) {
 
   // Multiply with opaque inputs: s*d in [0,1] -> 0x80 * 0x80 = 16384/65025
   // -> *255 + 0.5.
-  const uint32_t mul = skity::PorterDuffBlend(gray, gray,
-                                              skity::BlendMode::kMultiply);
+  const uint32_t mul =
+      skity::PorterDuffBlend(gray, gray, skity::BlendMode::kMultiply);
   const float half = 0x80 / 255.f;
   const uint32_t expect_mul = static_cast<uint32_t>(half * half * 255.f + 0.5f);
   EXPECT_EQ(expect_mul, ColorGetR(mul));
 
   // Screen: s + d - s*d; 0.5 -> 0.75.
-  const uint32_t scr = skity::PorterDuffBlend(gray, gray,
-                                              skity::BlendMode::kScreen);
+  const uint32_t scr =
+      skity::PorterDuffBlend(gray, gray, skity::BlendMode::kScreen);
   const uint32_t expect_scr =
       static_cast<uint32_t>((half + half - half * half) * 255.f + 0.5f);
   EXPECT_EQ(expect_scr, ColorGetR(scr));
 
   // Darken / Lighten of black and white.
-  EXPECT_EQ(black, skity::PorterDuffBlend(black, white,
-                                          skity::BlendMode::kDarken));
-  EXPECT_EQ(white, skity::PorterDuffBlend(black, white,
-                                          skity::BlendMode::kLighten));
+  EXPECT_EQ(black,
+            skity::PorterDuffBlend(black, white, skity::BlendMode::kDarken));
+  EXPECT_EQ(white,
+            skity::PorterDuffBlend(black, white, skity::BlendMode::kLighten));
   // Exclusion with black leaves dst; with white inverts dst.
-  EXPECT_EQ(white, skity::PorterDuffBlend(black, white,
-                                          skity::BlendMode::kExclusion));
-  const uint32_t inv = skity::PorterDuffBlend(white, gray,
-                                              skity::BlendMode::kExclusion);
+  EXPECT_EQ(white,
+            skity::PorterDuffBlend(black, white, skity::BlendMode::kExclusion));
+  const uint32_t inv =
+      skity::PorterDuffBlend(white, gray, skity::BlendMode::kExclusion);
   EXPECT_EQ(255 - 0x80, ColorGetR(inv));
   // Difference of equal colors is transparent black in rgb, opaque alpha.
-  const uint32_t diff = skity::PorterDuffBlend(gray, gray,
-                                               skity::BlendMode::kDifference);
+  const uint32_t diff =
+      skity::PorterDuffBlend(gray, gray, skity::BlendMode::kDifference);
   EXPECT_EQ(0u, ColorGetR(diff));
   EXPECT_EQ(255u, ColorGetA(diff));
   // ColorDodge: white src pins output to white.
-  EXPECT_EQ(white, skity::PorterDuffBlend(white, gray,
-                                          skity::BlendMode::kColorDodge));
+  EXPECT_EQ(white,
+            skity::PorterDuffBlend(white, gray, skity::BlendMode::kColorDodge));
   // SoftLight with dst alpha 0 returns src.
-  EXPECT_EQ(gray, skity::PorterDuffBlend(gray, 0,
-                                         skity::BlendMode::kSoftLight));
-  EXPECT_TRUE(BlendEq(skity::PorterDuffBlend(gray, black,
-                                             skity::BlendMode::kColorBurn),
-                      skity::PorterDuffBlend(gray, black,
-                                             skity::BlendMode::kColorBurn)));
+  EXPECT_EQ(gray,
+            skity::PorterDuffBlend(gray, 0, skity::BlendMode::kSoftLight));
+  EXPECT_TRUE(BlendEq(
+      skity::PorterDuffBlend(gray, black, skity::BlendMode::kColorBurn),
+      skity::PorterDuffBlend(gray, black, skity::BlendMode::kColorBurn)));
 }

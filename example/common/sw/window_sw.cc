@@ -193,8 +193,7 @@ GLFWwindow* WindowSW::CreateWindowHandler() {
 #ifdef SKITY_SW_ACCEL
   // Dev switch: press S to toggle the SIMD-accelerated SW path and compare
   // rendering results / performance against the legacy brush live.
-  glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int, int action,
-                                int) {
+  glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int, int action, int) {
     if (action != GLFW_PRESS || key != GLFW_KEY_S) {
       return;
     }
