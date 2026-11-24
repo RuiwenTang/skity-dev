@@ -15,6 +15,7 @@
 #include <skity/render/canvas.hpp>
 #include <vector>
 
+#include "src/graphic/bitmap_sampler.hpp"
 #include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
 #include "src/render/sw/accel/sw_accel.hpp"
@@ -682,6 +683,250 @@ TEST(SWAccel, GradientCanvasAccelMatchesLegacy) {
                              "the runtime switch did not reach the renderer";
   EXPECT_GT(legacy_gradient_pixels, static_cast<int64_t>(kW) * kH / 4)
       << "the scalar gradient fallback did not paint";
+}
+
+// ---------------------------------------------------------------------------
+// Image spans
+// ---------------------------------------------------------------------------
+
+// Reference through the REAL legacy chain: BitmapSampler::GetColor (the same
+// scalar sampler PixmapBrush::CalculateColor calls) + the premul and coverage
+// folds + the real PorterDuffBlend. Returns the PMColor word (0xAARRGGBB).
+uint32_t ImagePixelRef(skity::Bitmap* texture, const float m[6],
+                       skity::TileMode x_tile, skity::TileMode y_tile,
+                       skity::FilterMode filter, int32_t x, int32_t y,
+                       uint8_t alpha) {
+  skity::SamplingOptions options{filter, skity::MipmapMode::kNone};
+  skity::BitmapSampler sampler(*texture, options, x_tile, y_tile);
+  const float fx = x + 0.5f;
+  const float fy = y + 0.5f;
+  const skity::Vec2 uv{(fx * m[0] + fy * m[1]) + m[2],
+                       (fx * m[3] + fy * m[4]) + m[5]};
+  skity::Color color = sampler.GetColor(uv);
+  if (texture->GetAlphaType() == skity::AlphaType::kUnpremul_AlphaType) {
+    color = skity::ColorToPMColor(color);
+  }
+  if (alpha != 255) {
+    color = skity::AlphaMulQ(color, alpha);
+  }
+  return color;
+}
+
+// The reference blend: coverage is already folded into the color; the real
+// PorterDuffBlend produces the memory word (0xAABBGGRR).
+uint32_t ImageBlendRef(skity::BlendMode mode, uint32_t src_pm,
+                       uint32_t dst_mem) {
+  return skity::PMColorSwapRB(
+      skity::PorterDuffBlend(src_pm, skity::PMColorSwapRB(dst_mem), mode));
+}
+
+skity::sw_accel::ImageParams MakeImageParams(
+    skity::Bitmap* texture, const float m[6], skity::TileMode x_tile,
+    skity::TileMode y_tile, skity::FilterMode filter, uint8_t global_alpha) {
+  skity::sw_accel::ImageParams p{};
+  p.texels = texture->GetPixelAddr();
+  p.tex_row_bytes = texture->RowBytes();
+  p.tex_width = static_cast<int32_t>(texture->Width());
+  p.tex_height = static_cast<int32_t>(texture->Height());
+  p.m00 = m[0];
+  p.m01 = m[1];
+  p.m02 = m[2];
+  p.m10 = m[3];
+  p.m11 = m[4];
+  p.m12 = m[5];
+  p.x_tile_mode = static_cast<int32_t>(x_tile);
+  p.y_tile_mode = static_cast<int32_t>(y_tile);
+  p.bilinear = filter == skity::FilterMode::kLinear;
+  p.src_premul = texture->GetAlphaType() == skity::AlphaType::kPremul_AlphaType;
+  p.global_alpha = global_alpha;
+  return p;
+}
+
+TEST(SWAccel, ImageSpansMatchLegacySamplerChain) {
+  // Two 12x9 textures - a premul one with alpha edges (including zero) and
+  // an unpremul one with arbitrary bytes - across both filters, every
+  // tile-mode pair, two transforms, both supported blend modes and two
+  // global alphas. The reference runs the actual scalar chain
+  // (BitmapSampler + PorterDuffBlend), so the SIMD kernels must agree to
+  // the bit, including the MulDiv255Round coverage/global-alpha fold.
+  skity::Bitmap premul_tex(12, 9, skity::AlphaType::kPremul_AlphaType);
+  skity::Bitmap unpremul_tex(12, 9, skity::AlphaType::kUnpremul_AlphaType);
+  uint32_t state = 0x1234567u;
+  for (uint32_t y = 0; y < 9; y++) {
+    for (uint32_t x = 0; x < 12; x++) {
+      const uint32_t hash = NextRandom(state);
+      const uint32_t alpha = ((x * 7 + y * 5) % 8) * 36;
+      premul_tex.SetPixel(x, y,
+                          skity::ColorSetARGB(alpha, hash % (alpha + 1),
+                                              (hash >> 8) % (alpha + 1),
+                                              (hash >> 16) % (alpha + 1)));
+      unpremul_tex.SetPixel(
+          x, y,
+          skity::ColorSetARGB((hash >> 24) % 256, hash % 256, (hash >> 8) % 256,
+                              (hash >> 16) % 256));
+    }
+  }
+
+  const skity::TileMode tiles[] = {
+      skity::TileMode::kClamp, skity::TileMode::kRepeat,
+      skity::TileMode::kMirror, skity::TileMode::kDecal};
+  const skity::FilterMode filters[] = {skity::FilterMode::kNearest,
+                                       skity::FilterMode::kLinear};
+  const float matrices[2][6] = {
+      {0.08f, 0.004f, -0.1f, 0.11f, 0.006f, -0.25f},
+      {0.9f, -0.35f, 0.15f, 0.4f, 0.85f, -0.4f},
+  };
+  const std::vector<Span> spans = RandomSpans(state);
+
+  for (skity::Bitmap* tex : {&premul_tex, &unpremul_tex}) {
+    for (skity::FilterMode filter : filters) {
+      for (int t = 0; t < 4; t++) {
+        for (const auto& m : matrices) {
+          for (uint8_t global_alpha : {255, 128}) {
+            for (skity::BlendMode mode :
+                 {skity::BlendMode::kSrc, skity::BlendMode::kSrcOver}) {
+              const auto params = MakeImageParams(
+                  tex, m, tiles[t], tiles[(t + 1) % 4], filter, global_alpha);
+              std::vector<uint32_t> expect(kWidth * kHeight);
+              for (auto& px : expect) {
+                px = RandomColor(state);
+              }
+              std::vector<uint32_t> actual = expect;
+
+              for (const Span& span : spans) {
+                int32_t x = span.x;
+                int32_t y = span.y;
+                int32_t len = span.len;
+                if (y < 0 || y >= kHeight || x >= kWidth || len <= 0) {
+                  continue;
+                }
+                if (x < 0) {
+                  len += x;
+                  x = 0;
+                }
+                if (x + len > kWidth) {
+                  len = kWidth - x;
+                }
+                if (len <= 0) {
+                  continue;
+                }
+                const uint8_t alpha = static_cast<uint8_t>(
+                    skity::MulDiv255Round(span.cover, global_alpha));
+                for (int32_t i = 0; i < len; i++) {
+                  const size_t idx = static_cast<size_t>(y) * kWidth + x + i;
+                  expect[idx] = ImageBlendRef(
+                      mode,
+                      ImagePixelRef(tex, m, tiles[t], tiles[(t + 1) % 4],
+                                    filter, x + i, y, alpha),
+                      expect[idx]);
+                }
+              }
+
+              ASSERT_TRUE(skity::sw_accel::FillImageSpans(
+                  params, mode, reinterpret_cast<uint8_t*>(actual.data()),
+                  kWidth * 4, kWidth, kHeight, spans.data(), spans.size()));
+              for (size_t i = 0; i < expect.size(); i++) {
+                ASSERT_EQ(expect[i], actual[i])
+                    << "tex " << (tex == &premul_tex ? "premul" : "unpremul")
+                    << " filter " << static_cast<int>(filter) << " tile " << t
+                    << " mode " << static_cast<int>(mode) << " ga "
+                    << static_cast<int>(global_alpha) << " pixel " << i;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+void DrawImageScene(skity::Canvas* canvas) {
+  // Every draw exercises a different gate: premul nearest/linear and an
+  // unpremul texture through the accelerator, tile-mode shader rects, a
+  // non-sRGB-tagged texture and a cubic sample through the scalar sampler,
+  // and a translucent paint folding span coverage with global alpha. The
+  // scene must render identically with the accelerator on and off.
+  skity::Bitmap tex_a(8, 8, skity::AlphaType::kPremul_AlphaType);
+  skity::Bitmap tex_b(8, 8, skity::AlphaType::kUnpremul_AlphaType);
+  const skity::Color blocks[] = {skity::Color_RED, skity::Color_GREEN,
+                                 skity::Color_BLUE, skity::Color_YELLOW};
+  for (uint32_t y = 0; y < 8; y++) {
+    for (uint32_t x = 0; x < 8; x++) {
+      tex_a.SetPixel(x, y, blocks[(y / 4) * 2 + x / 4]);
+      const bool red = ((x / 2) + (y / 2)) % 2 == 0;
+      tex_b.SetPixel(x, y, red ? skity::Color_RED : skity::Color_BLUE);
+    }
+  }
+  skity::Bitmap tex_c(4, 4, skity::AlphaType::kPremul_AlphaType);
+  ASSERT_TRUE(tex_c.GetPixmap()->SetColorInfo(skity::kPremul_AlphaType,
+                                              skity::ColorType::kRGBA,
+                                              skity::ColorSpace::SRGBLinear()));
+  for (uint32_t y = 0; y < 4; y++) {
+    for (uint32_t x = 0; x < 4; x++) {
+      tex_c.SetPixel(x, y, skity::ColorSetARGB(255, 64, 64, 64));
+    }
+  }
+  auto image_a = skity::Image::MakeImage(tex_a.GetPixmap());
+  auto image_b = skity::Image::MakeImage(tex_b.GetPixmap());
+  auto image_c = skity::Image::MakeImage(tex_c.GetPixmap());
+
+  skity::Paint paint;
+  paint.SetColor(skity::Color_WHITE);
+  canvas->DrawPaint(paint);
+
+  const skity::SamplingOptions linear{skity::FilterMode::kLinear,
+                                      skity::MipmapMode::kNone};
+  const skity::SamplingOptions nearest{skity::FilterMode::kNearest,
+                                       skity::MipmapMode::kNone};
+  skity::SamplingOptions cubic{};
+  cubic.cubic = skity::CubicResampler{0.f, 0.5f};
+
+  canvas->DrawImageRect(image_a, skity::Rect::MakeWH(8.f, 8.f),
+                        skity::Rect::MakeXYWH(2.f, 2.f, 44.f, 40.f), linear);
+  canvas->DrawImageRect(image_b, skity::Rect::MakeWH(8.f, 8.f),
+                        skity::Rect::MakeXYWH(50.f, 2.f, 40.f, 24.f), nearest);
+
+  paint.SetShader(skity::Shader::MakeShader(
+      image_a, nearest, skity::TileMode::kRepeat, skity::TileMode::kMirror));
+  canvas->DrawRect(skity::Rect::MakeXYWH(2.f, 44.f, 30.f, 24.f), paint);
+  paint.SetShader(skity::Shader::MakeShader(
+      image_a, linear, skity::TileMode::kDecal, skity::TileMode::kClamp));
+  canvas->DrawRect(skity::Rect::MakeXYWH(34.f, 44.f, 30.f, 24.f), paint);
+  paint.SetShader(nullptr);
+
+  canvas->DrawImageRect(image_c, skity::Rect::MakeWH(4.f, 4.f),
+                        skity::Rect::MakeXYWH(66.f, 48.f, 26.f, 20.f), linear);
+
+  paint.SetAlphaF(0.5f);
+  canvas->DrawImageRect(image_b, skity::Rect::MakeWH(8.f, 8.f),
+                        skity::Rect::MakeXYWH(20.f, 10.f, 16.f, 16.f), nearest);
+  paint.SetAlphaF(1.f);
+
+  canvas->DrawImageRect(image_a, skity::Rect::MakeWH(8.f, 8.f),
+                        skity::Rect::MakeXYWH(50.f, 28.f, 40.f, 18.f), cubic);
+}
+
+TEST(SWAccel, ImageCanvasAccelMatchesLegacy) {
+  constexpr int32_t kW = 96;
+  constexpr int32_t kH = 72;
+
+  skity::sw_accel::SetEnabled(false);
+  skity::Bitmap legacy(kW, kH, skity::AlphaType::kPremul_AlphaType);
+  auto legacy_canvas = skity::Canvas::MakeSoftwareCanvas(&legacy);
+  DrawImageScene(legacy_canvas.get());
+  skity::sw_accel::SetEnabled(true);
+
+  skity::Bitmap accel(kW, kH, skity::AlphaType::kPremul_AlphaType);
+  auto accel_canvas = skity::Canvas::MakeSoftwareCanvas(&accel);
+  DrawImageScene(accel_canvas.get());
+
+  const uint32_t* lp = reinterpret_cast<const uint32_t*>(legacy.GetPixelAddr());
+  const uint32_t* ap = reinterpret_cast<const uint32_t*>(accel.GetPixelAddr());
+  for (size_t i = 0; i < static_cast<size_t>(kW) * kH; i++) {
+    ASSERT_EQ(lp[i], ap[i])
+        << "pixel " << i << " (x " << (i % kW) << ", y " << (i / kW) << ")"
+        << std::hex << ": legacy " << lp[i] << " accel " << ap[i];
+  }
 }
 
 #endif  // SKITY_SW_ACCEL
