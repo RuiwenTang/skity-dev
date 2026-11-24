@@ -32,10 +32,18 @@ class BitmapSampler {
 
   Color GetColor(Vec2 uv) const;
 
+  // Whether the folded color transform is a no-op (the source space equals
+  // the target space), i.e. GetColor returns stored bytes unchanged. The
+  // accelerated image path only takes over when this holds.
+  bool ColorTransformIsNoop() const { return steps_.IsNoop(); }
+
  private:
   Vec4 SampleUnitNearest(Vec2 uv) const;
 
   Vec4 SampleUnitLinear(Vec2 uv) const;
+
+  // Fast bicubic (GPU-mirrored fold into four bilinear samples).
+  Vec4 SampleUnitCubic(Vec2 uv) const;
 
   Vec4 SampleXY(Vec2 xy) const;
 
