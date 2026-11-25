@@ -143,7 +143,7 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   blit_two_alphas 语义回归、行缓冲重叠折叠、arm NEON 混合统一)✅ →
   **M2-1 图像采样** ✅(标量 cubic 镜像 GPU fast-bicubic + SIMD nearest/bilinear
   fetch/blend 引擎 + 逐像素 src 混合引擎提取复用,`cover & global_alpha` 位与 bug
-  顺带修,arm NEON 采样统一到标量)→ **M2-2 glyph A8 atlas**
+  顺带修,arm NEON 采样统一到标量)→ **M2-2 glyph A8 atlas** ✅
   (软绘切 FreeType mask,复用 AtlasBitmap/PrepareDirectGlyphs)→
   **M2-3 raster clip**(rect fast path + A8 mask 两档,修 min(cover)/PerformMerge)→
   **M2-4 行直连整合**(行缓冲直供消费端、梯度全 28 模式、删加速态 BrushH)|
@@ -473,6 +473,66 @@ BitmapSampler + PorterDuffBlend 链位精确:premul/unpremul × 双 filter ×
 非 sRGB 纹理、半透明 paint、cubic 各走对应路径);Debug + Release 双构建
 单测全绿(Release 目录 7 个 ShaderWriter 失败为该目录 WGX_SPIRV_BACKEND=OFF
 的配置遗留,与本片无关)。
+
+### M2-2 记录(2026-11-25,glyph A8 atlas)
+
+**方案取舍**(为什么是 mask atlas 而不是"span 缓存"):
+1. **表示形态决定混合内循环**——24px 字形 ≈ 50~80 个 1~3px 碎片 span,重放
+   span 缓存仍是逐 span 分支 + 标量混合;稠密 A8 行直接吃 SIMD(M2-1 实测
+   nearest blit 1.3 ns/px 那一档)。文本是碎片化惩罚最大的负载。
+2. **FreeType 原生输出就是 A8 mask**(`FT_RENDER_MODE_NORMAL`),mask 路径的
+   "光栅化" = FreeType 渲染 + memcpy 进 atlas;span 缓存要么保留自研扫描
+   转换器(正是要删的成本),要么把 mask 再转 span(白绕一圈)。
+3. **设施已在**:`src/render/text/atlas/` 的 AtlasBitmap(纯内存打包页)+
+   ScalerContext 的 PrepareOwnedImage 是 GPU 字形管线的现成生产链,缓存 key
+   (GlyphKey = PackedGlyphID + ScalerContextDesc)已定型;CPU 复用同构,
+   span 缓存是两边都要新建的设施。GPU/CPU 对称。
+4. span 缓存的正确场景是**大路径反复填充**(M2-4/M4 范畴),与文本的
+   "海量重复小图元"是不同形状的负载。
+
+**实现**:
+- `SWGlyphAtlas`(进程级、mutex 保护):AtlasBitmap 512×512 A8 页惰性分页,
+  miss 时经 `ScalerContextCache → PrepareOwnedImage` 渲染并插入;key = 全量
+  ScalerContextDesc(字号/scaleX/skewX/**设备 2×2 变换**/hinting/edging/
+  亚像素开关),缩放/旋转文字按矩阵桶缓存,与 GPU 行为一致;
+- 落位契约(port 已文档化):packed phase 融进 mask、`origin = bitmap_left -
+  phase`,blit 位置 `quantized pen + origin` 恒为整数网格点;
+- 准入(run 级):fill + 非 color emoji + 无 shader/color filter + 目标
+  premul kRGBA + 无 path 裁剪(HasClip → M2-3 后放开;rect 裁剪经全局 clip
+  bounds 天然生效);kTooLarge/kInvalidImage 字形逐个回退 path 管线
+  (**path 懒加载**:命中的字形不再 LoadGlyphPath);stroke 文字走原管线;
+- 混合:kSrc/kSrcOver 走新 SIMD kernel(`BlendMaskRect`:mask 字节经
+  TableLookupBytes lane/4 广播 → MulDiv255Round 折 global alpha →
+  AlphaMulQ 折颜色 → `VariableSrcOverStore`;mask==255 的 lane 保色跳过
+  折叠——截断会差 1;lane/4 广播依赖 TableLookupBytes 的 128-bit lane
+  局部性,与 BroadcastLaneByte 同一算术,任意向量宽度成立),其余模式标量
+  `BlendGlyphMaskRect`(sw_render_target,全模式,与 kernel 位精确);
+  Validate 熔断扩至 mask kernel(位精确);
+- Debug 构建下 golden 与单测同样有效(本轮 mask 折叠全为整数运算,无
+  M2-1 那类 fma 收缩敏感点)。
+
+**测量教训(重要)**:`test-runner.py` 的 golden 套件默认 `--backend=metal`,
+**不带 `--backend=software` 时软件专属 case 全部被 skip**——M2-1 记录里
+"golden-shape 284/284、golden-text 8/8" 计入的是 GPU 后端 case,软件路径
+当时并未真正打到。M2-2 起以 `--backend=software` 的
+**golden-shape 24/24、golden-text 2/2** 为准(与 M2-0 口径一致),M2-1 的
+图像 golden 在软件后端复验同样通过。bench_release / host_rel 的 CMake 缓存
+存在 `SKITY_VK_BACKEND=ON + WGX_SPIRV_BACKEND=OFF` 的不一致状态,CMakeLists
+变更触发重配置时才暴露(`cmake -DWGX_SPIRV_BACKEND=ON <dir>` 修复)。
+
+**golden 归因与重录**(M2 计划已批准"接受 FreeType-mask 文字 + 重录基线"):
+`--backend=software` 下 PositionedGlyphs 59 像素超容差(max 51,均值 4.6)、
+ClipRect(require_exact)36 像素(max 68)——均为 FreeType 光栅化器与自研
+扫描转换器在抗锯齿边缘的覆盖值差异,目检实际输出字形/位置/裁剪全部正确后
+重录两条 `_sw` 基线。
+
+**性能(arm64 Release,cmake_bench_release)**:
+文字 blob(34 字形)**117μs → 7.3μs ≈ 16×**(0.215 μs/glyph,M2-0 锚点
+3.7 μs/glyph 闭环;跨构建对比,但量级远超构建方差);全场景 A/B 同二进制
+1040 vs 8574μs = -88%(维持 M2-1 水平,场景内文字段收益部分被场景方差吞没)。
+单测新增 `MaskRectMatchesScalarChain`(对拍真实标量链,含负偏移表面裁剪)与
+`TextCanvasAccelMatchesLegacy`(canvas A/B 位相等 + atlas 反退化断言);
+Debug 1274 通过 + Release 12/12(仅既有 Arena 2 项)。
 
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
