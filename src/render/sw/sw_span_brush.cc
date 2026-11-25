@@ -77,41 +77,41 @@ void SWSpanBrush::Brush() {
     auto u_alpha =
         static_cast<uint8_t>(MulDiv255Round(span.cover, global_alpha_));
 
-    BrushH(x, y, len, u_alpha);
-  }
-  OnPostBrush();
-}
+    if (len == 1 || PureColor()) {
+      PMColor color = CalculateColor(x, y);
 
-void SWSpanBrush::BrushH(int32_t x, int32_t y, int32_t length, int32_t alpha) {
-  if (length == 1 || PureColor()) {
-    PMColor color = CalculateColor(x, y);
-
-    if (alpha != 255) {
-      color = AlphaMulQ(color, alpha);
-    }
-
-    if (color_filter_) {
-      color = color_filter_->FilterColor(color);
-    }
-    render_target_.BlendPixelH(x, y, color, length, blend_);
-  } else {
-    std::vector<uint32_t> pm_colors(static_cast<size_t>(length));
-
-    for (int32_t l = 0; l < length; l++) {
-      PMColor color = CalculateColor(x + l, y);
-      if (alpha != 255) {
-        color = AlphaMulQ(color, alpha);
+      if (u_alpha != 255) {
+        color = AlphaMulQ(color, u_alpha);
       }
 
       if (color_filter_) {
         color = color_filter_->FilterColor(color);
       }
+      render_target_.BlendPixelH(x, y, color, len, blend_);
+    } else {
+      // Produce the dense color row once, blend it in one call: the
+      // per-span heap buffer and the per-span virtual hop are gone.
+      if (row_colors_.size() < static_cast<size_t>(len)) {
+        row_colors_.resize(static_cast<size_t>(len));
+      }
 
-      pm_colors[l] = color;
+      for (int32_t l = 0; l < len; l++) {
+        PMColor color = CalculateColor(x + l, y);
+        if (u_alpha != 255) {
+          color = AlphaMulQ(color, u_alpha);
+        }
+
+        if (color_filter_) {
+          color = color_filter_->FilterColor(color);
+        }
+
+        row_colors_[l] = color;
+      }
+
+      render_target_.BlendPixelH(x, y, row_colors_.data(), len, blend_);
     }
-
-    render_target_.BlendPixelH(x, y, pm_colors.data(), length, blend_);
   }
+  OnPostBrush();
 }
 
 SolidColorBrush::SolidColorBrush(std::vector<Span> const& spans, Bitmap* bitmap,
@@ -509,10 +509,11 @@ class ConicalGradientColorBrush : public GradientColorBrush {
 #ifdef SKITY_SW_ACCEL
 // Gradient fill through the SIMD accelerator: precomputes the stop table in
 // OnPreBrush and hands the whole span list to sw_accel::FillGradientSpans in
-// one pass. The kernel chain is bit-exact with the scalar brush, so the only
-// accepted configurations are the ones whose legacy math it reproduces;
-// everything else (sweep/conical, other blend modes, unpremul or non-RGBA
-// surfaces, color filters, degenerate gradients) keeps the legacy path.
+// one pass, for every blend mode (kSrc/kSrcOver fused, the rest staged).
+// The LUT fetch matches the scalar chain within about 2 per channel, so the
+// accepted configurations are the ones that tolerate that headroom;
+// everything else (sweep/conical, unpremul or non-RGBA surfaces, color
+// filters, degenerate gradients) keeps the legacy path.
 class AcceleratedGradientColorBrush : public GradientColorBrush {
  public:
   AcceleratedGradientColorBrush(std::vector<Span> const& spans, Bitmap* bitmap,
@@ -639,8 +640,7 @@ std::unique_ptr<GradientColorBrush> GradientColorBrush::MakeGradientColorBrush(
     BlendMode blend, Shader::GradientInfo info, Shader::GradientType type,
     const Matrix& device_to_local) {
 #ifdef SKITY_SW_ACCEL
-  if (color_filter == nullptr &&
-      (blend == BlendMode::kSrcOver || blend == BlendMode::kSrc) &&
+  if (color_filter == nullptr && sw_accel::SupportsGradientMode(blend) &&
       (type == Shader::GradientType::kLinear ||
        type == Shader::GradientType::kRadial) &&
       info.colors.size() >= 2 &&

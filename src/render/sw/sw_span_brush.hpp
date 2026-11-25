@@ -43,7 +43,7 @@ class SWSpanBrush {
   virtual ~SWSpanBrush() = default;
 
   // Virtual so accelerated brushes can take the whole span list in one pass
-  // (the per-span BrushH extension point alone is too fine-grained for them).
+  // (the scalar loop below is the fallback they fall back into).
   virtual void Brush();
 
  protected:
@@ -62,8 +62,6 @@ class SWSpanBrush {
 
   SWRenderTarget& GetRenderTarget() { return render_target_; }
 
-  virtual void BrushH(int32_t x, int32_t y, int32_t length, int32_t alpha);
-
   virtual void OnPreBrush() {}
   virtual void OnPostBrush() {}
 
@@ -75,6 +73,10 @@ class SWSpanBrush {
   BlendMode blend_;
   uint8_t global_alpha_;
   SWRenderTarget render_target_;
+  // Dense color row shared by every span of one draw: produced per span and
+  // handed to the target in a single blend call, so the legacy path never
+  // materializes a heap buffer per span.
+  std::vector<PMColor> row_colors_;
 };
 
 class SolidColorBrush : public SWSpanBrush {

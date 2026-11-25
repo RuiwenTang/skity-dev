@@ -31,6 +31,10 @@ class SWRenderTarget {
                    BlendMode blend = BlendMode::kDefault);
 
  private:
+  // True when the row can blend straight against the pixel buffer (premul
+  // ColorType::kRGBA, in bounds) - see BlendPixelH.
+  bool BlendRowDirect(uint32_t x, uint32_t y, uint32_t len);
+
   bool FastBlend(uint32_t x, uint32_t y, Color color, BlendMode blend);
 
   Bitmap* bitmap_;

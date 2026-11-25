@@ -49,8 +49,35 @@ void SWRenderTarget::BlendPixel(uint32_t x, uint32_t y, Color4f color,
 // formula makes all three bit-identical for coeff modes; the accelerated
 // path is the fast lane, this one only has to agree with it.
 
+// Premul ColorType::kRGBA rows blend straight against the pixel buffer: the
+// brush has already clamped its spans, so the per-pixel GetPixel/SetPixel and
+// bounds machinery only remains for the formats this lane cannot serve
+// (unpremul surfaces keep the per-pixel path). Behavior is unchanged -
+// FastBlend's shortcuts are exact special cases of PorterDuffBlend, and every
+// blended pixel runs the same scalar formula as before.
+bool SWRenderTarget::BlendRowDirect(uint32_t x, uint32_t y, uint32_t len) {
+  return pixel_addr_ != nullptr &&
+         bitmap_->GetColorType() == ColorType::kRGBA &&
+         bitmap_->GetAlphaType() == AlphaType::kPremul_AlphaType &&
+         y < bitmap_->Height() && x < bitmap_->Width() &&
+         len <= bitmap_->Width() - x;
+}
+
 void SWRenderTarget::BlendPixelH(uint32_t x, uint32_t y, PMColor* pm_colors,
                                  uint32_t len, BlendMode blend) {
+  if (BlendRowDirect(x, y, len)) {
+    uint32_t* dst32 = reinterpret_cast<uint32_t*>(
+        pixel_addr_ + static_cast<size_t>(y) * bitmap_->RowBytes() +
+        static_cast<size_t>(x) * 4);
+    for (uint32_t i = 0; i < len; i++) {
+      const PMColor s = pm_colors[i];
+      if (!FastBlend(x + i, y, s, blend)) {
+        dst32[i] =
+            PMColorSwapRB(PorterDuffBlend(s, PMColorSwapRB(dst32[i]), blend));
+      }
+    }
+    return;
+  }
   for (uint32_t i = 0; i < len; i++) {
     BlendPixel(x + i, y, pm_colors[i], blend);
   }
@@ -58,6 +85,18 @@ void SWRenderTarget::BlendPixelH(uint32_t x, uint32_t y, PMColor* pm_colors,
 
 void SWRenderTarget::BlendPixelH(uint32_t x, uint32_t y, PMColor pm_color,
                                  uint32_t len, BlendMode blend) {
+  if (BlendRowDirect(x, y, len)) {
+    uint32_t* dst32 = reinterpret_cast<uint32_t*>(
+        pixel_addr_ + static_cast<size_t>(y) * bitmap_->RowBytes() +
+        static_cast<size_t>(x) * 4);
+    for (uint32_t i = 0; i < len; i++) {
+      if (!FastBlend(x + i, y, pm_color, blend)) {
+        dst32[i] = PMColorSwapRB(
+            PorterDuffBlend(pm_color, PMColorSwapRB(dst32[i]), blend));
+      }
+    }
+    return;
+  }
   for (uint32_t i = 0; i < len; i++) {
     BlendPixel(x + i, y, pm_color, blend);
   }
