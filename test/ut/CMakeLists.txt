@@ -105,6 +105,7 @@ add_executable(skity_unit_test
     render/sw_canvas_test.cc
     render/sw_accel_test.cc
     render/sw_coverage_test.cc
+    render/sw_raster_clip_test.cc
     render/hw/hw_buffer_layout_test.cc
     render/hw/coverage_aa_line_encoder_test.cc
     render/hw/coverage_aa_path_tiler_test.cc
