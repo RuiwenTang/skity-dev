@@ -1182,6 +1182,93 @@ void ImageRunLinearSrcOverKernel(uint8_t* HWY_RESTRICT dst,
   ImageRunKernelT<true, true>(dst, ip, x, y, count, alpha);
 }
 
+// ---------------------------------------------------------------------------
+// Glyph mask fetch + blend kernels
+// ---------------------------------------------------------------------------
+
+// Blends one row of A8 glyph coverage with a constant premul color. The mask
+// is one byte per pixel while a dst pixel is four bytes, so the per-pixel
+// mask broadcast goes through a TableLookupBytes whose index is lane/4: the
+// table vector carries the row bytes contiguously, and because the lookup is
+// per 128-bit lane, lane L reads table bytes 16L..16L+3 - which are exactly
+// the mask bytes of pixels 4L..4L+3 (the same lane-local arithmetic
+// BroadcastLaneByte relies on). Coverage folds mirror the scalar brush:
+// MulDiv255Round against the global alpha, AlphaMulQ into the color (with
+// the 255-coverage lanes keeping the raw color - the scalar brush skips the
+// fold there and (c * 255) >> 8 would drop 1 from a 255 channel), then the
+// shared per-pixel-src blend.
+template <bool kBlendSrcOver>
+static void MaskRunKernelT(uint8_t* HWY_RESTRICT dst_row,
+                           const uint8_t* HWY_RESTRICT mask_row, size_t count,
+                           uint32_t src_pm, uint32_t alpha) {
+  const hn::ScalableTag<uint8_t> d8;
+  const hn::Half<decltype(d8)> d8h;
+  const hn::Half<hn::Half<decltype(d8)>> df8;  // one lane per mask pixel
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
+  const size_t vl = hn::Lanes(d8);
+  const size_t group = vl / 4;
+
+  alignas(64) uint8_t color_bytes[64];
+  FillSrcBytes(color_bytes, src_pm, group);
+  const auto color8 = hn::LoadU(d8, color_bytes);
+  const auto color_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, color8));
+  const auto color_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, color8));
+  const auto alpha16 = hn::Set(d16, static_cast<uint16_t>(alpha));
+  const auto full16 = hn::Set(d16, uint16_t{255});
+
+  size_t px = 0;
+  for (; px + group <= count; px += group) {
+    // The table vector: `group` mask bytes at its start, indexed by lane/4.
+    alignas(64) uint8_t mask_buf[64];
+    hn::StoreU(hn::LoadU(df8, mask_row + px), df8, mask_buf);
+    const auto mask8 = hn::TableLookupBytes(hn::LoadU(d8, mask_buf),
+                                            hn::ShiftRight<2>(hn::Iota(d8, 0)));
+    auto mask_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, mask8));
+    auto mask_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, mask8));
+    if (alpha != 255) {
+      mask_lo = RoundMul(mask_lo, alpha16);
+      mask_hi = RoundMul(mask_hi, alpha16);
+    }
+    auto s_lo = hn::IfThenElse(hn::Eq(mask_lo, full16), color_lo,
+                               ScaleMul(color_lo, mask_lo));
+    auto s_hi = hn::IfThenElse(hn::Eq(mask_hi, full16), color_hi,
+                               ScaleMul(color_hi, mask_hi));
+    const auto s8 =
+        hn::Combine(d8, hn::TruncateTo(d8h, s_hi), hn::TruncateTo(d8h, s_lo));
+    if constexpr (!kBlendSrcOver) {
+      hn::StoreU(s8, d8, dst_row + px * 4);
+    } else {
+      VariableSrcOverStore(s8, dst_row + px * 4, group);
+    }
+  }
+  uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst_row);
+  for (; px < count; px++) {
+    uint32_t m = mask_row[px];
+    if (alpha != 255) {
+      m = MulDiv255Round(m, alpha);
+    }
+    const uint32_t s = m == 255 ? src_pm : AlphaMulQ(src_pm, m);
+    if constexpr (!kBlendSrcOver) {
+      dst32[px] = PMColorSwapRB(s);
+    } else {
+      dst32[px] = PMColorSwapRB(
+          PorterDuffBlend(s, PMColorSwapRB(dst32[px]), BlendMode::kSrcOver));
+    }
+  }
+}
+
+void MaskRunSrcKernel(uint8_t* HWY_RESTRICT dst_row,
+                      const uint8_t* HWY_RESTRICT mask_row, size_t count,
+                      uint32_t src_pm, uint32_t alpha) {
+  MaskRunKernelT<false>(dst_row, mask_row, count, src_pm, alpha);
+}
+
+void MaskRunSrcOverKernel(uint8_t* HWY_RESTRICT dst_row,
+                          const uint8_t* HWY_RESTRICT mask_row, size_t count,
+                          uint32_t src_pm, uint32_t alpha) {
+  MaskRunKernelT<true>(dst_row, mask_row, count, src_pm, alpha);
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace sw_accel
 }  // namespace skity

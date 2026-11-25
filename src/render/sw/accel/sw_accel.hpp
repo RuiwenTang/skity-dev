@@ -196,6 +196,22 @@ bool FillImageSpans(const ImageParams& params, BlendMode mode,
                     uint8_t* dst_base, size_t row_bytes, int32_t width,
                     int32_t height, const Span* spans, size_t span_count);
 
+// Blends a dense A8 glyph mask with a constant premul color: each mask byte
+// is the pixel coverage, folded with global_alpha via MulDiv255Round and
+// into the color via AlphaMulQ (both truncating, exactly like the scalar
+// brush - the 255-coverage lanes keep the raw color), then blended with the
+// given mode. The rect is clipped to the destination surface bounds; the
+// mask pointer must cover [0, width) x [0, height) of the rect AFTER the
+// clip (the caller shifts it, or lets this function do it - pass the
+// unclipped rect and the mask covering it). kSrc / kSrcOver only; other
+// modes go through the scalar mask blend. Like FillSolidSpans, the caller
+// must check IsEnabled() first.
+bool BlendMaskRect(BlendMode mode, uint32_t src_pm, uint8_t global_alpha,
+                   uint8_t* dst_base, size_t row_bytes, int32_t dst_width,
+                   int32_t dst_height, int32_t x, int32_t y,
+                   const uint8_t* mask, size_t mask_stride, int32_t width,
+                   int32_t height);
+
 }  // namespace sw_accel
 }  // namespace skity
 

@@ -63,6 +63,9 @@ HWY_EXPORT(ImageRunLinearSrcKernel);
 HWY_EXPORT(ImageRunNearestSrcOverKernel);
 HWY_EXPORT(ImageRunLinearSrcOverKernel);
 
+HWY_EXPORT(MaskRunSrcKernel);
+HWY_EXPORT(MaskRunSrcOverKernel);
+
 namespace {
 
 using RunKernelFn = void (*)(uint8_t*, size_t, uint32_t);
@@ -96,6 +99,19 @@ ImageKernelFn SelectImageKernel(const ImageParams& params, BlendMode mode) {
   if (mode == BlendMode::kSrcOver) {
     return params.bilinear ? HWY_DYNAMIC_DISPATCH(ImageRunLinearSrcOverKernel)
                            : HWY_DYNAMIC_DISPATCH(ImageRunNearestSrcOverKernel);
+  }
+  return nullptr;
+}
+
+using MaskKernelFn = void (*)(uint8_t*, const uint8_t*, size_t, uint32_t,
+                              uint32_t);
+
+MaskKernelFn SelectMaskKernel(BlendMode mode) {
+  if (mode == BlendMode::kSrc) {
+    return HWY_DYNAMIC_DISPATCH(MaskRunSrcKernel);
+  }
+  if (mode == BlendMode::kSrcOver) {
+    return HWY_DYNAMIC_DISPATCH(MaskRunSrcOverKernel);
   }
   return nullptr;
 }
@@ -475,6 +491,48 @@ void ValidateImages() {
   }
 }
 
+// Scalar mirror of the legacy glyph-mask blend chain (Brush coverage fold:
+// MulDiv255Round(mask, alpha) then AlphaMulQ into the color, skipping the
+// fold at full coverage, then the real PorterDuffBlend), over memory words.
+uint32_t ReferenceMaskBlend(BlendMode mode, uint32_t src_pm, uint8_t coverage,
+                            uint8_t alpha, uint32_t dst_mem) {
+  uint32_t m = coverage;
+  if (alpha != 255) {
+    m = MulDiv255Round(m, alpha);
+  }
+  const uint32_t src = m == 255 ? src_pm : AlphaMulQ(src_pm, m);
+  return PMColorSwapRB(PorterDuffBlend(src, PMColorSwapRB(dst_mem), mode));
+}
+
+void ValidateMasks() {
+  // Mask kernels against the scalar legacy chain: both supported modes, two
+  // global alphas and mask rows with every coverage edge (0, 1, 64, 128,
+  // 254, 255), row lengths past the vector and across the tail. Bit-exact.
+  uint8_t mask[71];
+  for (size_t i = 0; i < sizeof(mask); i++) {
+    static const uint8_t kEdgeValues[] = {0, 1, 64, 128, 254, 255};
+    mask[i] = kEdgeValues[(i * 7) % 6];
+  }
+  for (BlendMode mode : {BlendMode::kSrc, BlendMode::kSrcOver}) {
+    MaskKernelFn kernel = SelectMaskKernel(mode);
+    for (uint32_t alpha : {255u, 128u}) {
+      uint32_t dst[71];
+      uint32_t expect[71];
+      for (size_t i = 0; i < 71; i++) {
+        dst[i] = ColorToPMColor(static_cast<uint32_t>(i * 2654435761u));
+        expect[i] = ReferenceMaskBlend(mode, 0xff204060u, mask[i],
+                                       static_cast<uint8_t>(alpha), dst[i]);
+      }
+      kernel(reinterpret_cast<uint8_t*>(dst), mask, 71, 0xff204060u, alpha);
+      for (size_t i = 0; i < 71; i++) {
+        if (dst[i] != expect[i]) {
+          return;
+        }
+      }
+    }
+  }
+}
+
 std::once_flag g_validate_once;
 bool g_available = false;
 
@@ -552,6 +610,7 @@ void ValidateOnce() {
   }
   ValidateGradients();
   ValidateImages();
+  ValidateMasks();
   g_available = true;
 }
 
@@ -938,6 +997,40 @@ bool FillImageSpans(const ImageParams& params, BlendMode mode,
     kernel(dst_base + static_cast<size_t>(y) * row_bytes +
                static_cast<size_t>(x) * 4,
            &params, x, y, static_cast<size_t>(len), alpha);
+  }
+  return true;
+}
+
+bool BlendMaskRect(BlendMode mode, uint32_t src_pm, uint8_t global_alpha,
+                   uint8_t* dst_base, size_t row_bytes, int32_t dst_width,
+                   int32_t dst_height, int32_t x, int32_t y,
+                   const uint8_t* mask, size_t mask_stride, int32_t width,
+                   int32_t height) {
+  // Same contract as FillSolidSpans: the caller checked IsEnabled().
+  if (!Available()) {
+    return false;
+  }
+  MaskKernelFn kernel = SelectMaskKernel(mode);
+  if (kernel == nullptr || mask == nullptr || width < 0 || height < 0) {
+    return false;
+  }
+  // Clip the rect to the destination surface; the mask pointer follows the
+  // clip so the caller can pass an unclipped rect with a full mask.
+  int32_t x0 = std::max(x, 0);
+  int32_t y0 = std::max(y, 0);
+  const int32_t x1 = std::min(x + width, dst_width);
+  const int32_t y1 = std::min(y + height, dst_height);
+  if (x0 >= x1 || y0 >= y1) {
+    return true;  // Fully outside; nothing to blend.
+  }
+  mask +=
+      static_cast<size_t>(y0 - y) * mask_stride + static_cast<size_t>(x0 - x);
+  const size_t count = static_cast<size_t>(x1 - x0);
+  for (int32_t row = y0; row < y1; row++) {
+    kernel(dst_base + static_cast<size_t>(row) * row_bytes +
+               static_cast<size_t>(x0) * 4,
+           mask, count, src_pm, global_alpha);
+    mask += mask_stride;
   }
   return true;
 }
