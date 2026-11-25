@@ -534,6 +534,46 @@ ClipRect(require_exact)36 像素(max 68)——均为 FreeType 光栅化器与自
 `TextCanvasAccelMatchesLegacy`(canvas A/B 位相等 + atlas 反退化断言);
 Debug 1274 通过 + Release 12/12(仅既有 Arena 2 项)。
 
+### M2-3 记录(2026-11-25,run-encoded raster clip)
+
+**方案**(讨论定稿,回应"Save/Restore 深栈的内存"关切):裁剪在 clip 时刻
+解析成"每像素覆盖",存储走**行程编码**(每行有序 `(x, len, cover)` 段,与
+CoverageRowBuffer 输出同构)而非稠密 A8——内存 ∝ 边缘复杂度而非面积,
+全屏 path 裁剪 1080p 下 ~10-30KB(稠密 2MB),深栈安全。两档制:
+- 第 0 档 bounds(整数 rect 交裁剪,零分配,与既有全局 clip bounds 行为
+  一致);第 1 档行程(path 裁剪 / 分数 rect / 混合 op 栈);
+- combine 在 clip 时刻一次完成:kIntersect 逐行归并、交叠处覆盖
+  `MulDiv255Round` 相乘并拆段;kDifference 逐行减法钳零。leading
+  kDifference 从全表面隐式基减起(帧形区域);
+- 填充消费统一一条覆盖链:`ClipSpans`(fill span × clip 段,乘法拆段)→
+  既有 `MulDiv255Round(·, global_alpha)` → `AlphaMulQ(color, ·)` → blend,
+  四类填充(solid/gradient/image/mask)零 kernel 改动;文字走逐行
+  staging(glyph mask × stage 行),`HasClip` 门放开;
+- 正确性:差分测试锁死——随机 clip op 序列(run/bounds 混合、200 轮)+
+  随机 fill spans,行程结果 vs 稠密逐像素参考逐位一致;边界语义
+  (覆盖 0 的像素不 blit、小覆盖相乘舍入为 0)与 legacy/Skia blitter 对齐。
+
+**语义变化与 golden 归因(重要)**:AA 裁剪边缘从旧实现的"硬减法"
+(`spans_subtraction` 忽略 clip 段覆盖值、整段删除)变为**乘法软边缘**
+(Skia AAClip 同款)。ClipPathDifference vs GPU 基线从 21 像素(M2-0 残余)
+变为 1000 像素(全 >8,max 255)——M2-0 预言"重做时一并消除"方向错了:
+精确的软边缘与 GPU 的**二值 stencil 硬边**差异比近似更大,但这正是
+Skia CPU 的语义(CPU 渲染器全程 AA 哲学的延伸),`_sw` 每后端基线存在的
+意义就是承载它。重录 `_sw` 基线;**跨后端在裁剪 AA 边缘的分歧(软 vs 硬)
+登记为已知语义差异**,M3 交叉容差验收时按边缘带豁免或对齐 GPU。
+
+**顺带退役**:PerformMerge(TODO "not correct")、FindSpan(第三分支 `+1`
+off-by-one)、spans_subtraction、RecursiveClip 的 op 匹配逻辑、每次填充的
+span 求交。OnDrawPaint 统一走 DoBrush。
+
+**性能(arm64 Release,cmake_bench_release)**:全场景 A/B 同二进制
+1009 vs 8136μs = -88%(维持);逐次绘制 805 ns/draw、文字 7.29μs
+(0.215 μs/glyph)——锚点全部维持。带 clip 的填充新增逐像素折叠成本,
+本场景无 path 裁剪,无回归。
+单测新增 `SWRasterClip.*` 5 项(差分 fuzz + 边界 + span 合成 + staging);
+`TextCanvasAccelMatchesLegacy` 扩展 path-clip 交/差两种文字绘制;
+Debug 1279 通过 + Release 17/17(仅既有 Arena 2 项)。
+
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
