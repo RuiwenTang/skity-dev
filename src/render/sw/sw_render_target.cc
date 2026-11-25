@@ -4,6 +4,8 @@
 
 #include "src/render/sw/sw_render_target.hpp"
 
+#include <algorithm>
+
 #include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
 
@@ -114,6 +116,44 @@ bool SWRenderTarget::FastBlend(uint32_t x, uint32_t y, Color color,
   }
 
   return false;
+}
+
+void BlendGlyphMaskRect(const uint8_t* mask, size_t mask_stride, int32_t x,
+                        int32_t y, int32_t width, int32_t height,
+                        uint8_t* dst_base, size_t row_bytes, int32_t dst_width,
+                        int32_t dst_height, PMColor src_pm,
+                        uint8_t global_alpha, BlendMode blend) {
+  if (mask == nullptr || dst_base == nullptr || width <= 0 || height <= 0) {
+    return;
+  }
+  // Clip to the destination surface, shifting the mask pointer along - the
+  // same bounds handling the accelerated BlendMaskRect applies.
+  const int32_t x0 = std::max(x, 0);
+  const int32_t y0 = std::max(y, 0);
+  const int32_t x1 = std::min(x + width, dst_width);
+  const int32_t y1 = std::min(y + height, dst_height);
+  if (x0 >= x1 || y0 >= y1) {
+    return;
+  }
+  mask +=
+      static_cast<size_t>(y0 - y) * mask_stride + static_cast<size_t>(x0 - x);
+  const size_t count = static_cast<size_t>(x1 - x0);
+  for (int32_t row = y0; row < y1; row++) {
+    uint32_t* dst32 = reinterpret_cast<uint32_t*>(
+        dst_base + static_cast<size_t>(row) * row_bytes +
+        static_cast<size_t>(x0) * 4);
+    const uint8_t* mask_row =
+        mask + static_cast<size_t>(row - y0) * mask_stride;
+    for (size_t i = 0; i < count; i++) {
+      uint32_t m = mask_row[i];
+      if (global_alpha != 255) {
+        m = MulDiv255Round(m, global_alpha);
+      }
+      const uint32_t s = m == 255 ? src_pm : AlphaMulQ(src_pm, m);
+      dst32[i] =
+          PMColorSwapRB(PorterDuffBlend(s, PMColorSwapRB(dst32[i]), blend));
+    }
+  }
 }
 
 }  // namespace skity

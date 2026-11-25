@@ -5,6 +5,7 @@
 #include "src/render/sw/sw_canvas.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <skity/effect/mask_filter.hpp>
@@ -21,11 +22,14 @@
 #include "src/effect/image_filter_base.hpp"
 #include "src/effect/mask_filter_priv.hpp"
 #include "src/effect/pixmap_shader.hpp"
+#include "src/graphic/color_priv.hpp"
 #include "src/graphic/color_transform.hpp"
 #include "src/render/paint_order.hpp"
+#include "src/render/sw/sw_glyph_atlas.hpp"
 #include "src/render/sw/sw_raster.hpp"
 #include "src/render/sw/sw_span_brush.hpp"
 #include "src/render/sw/sw_stack_blur.hpp"
+#include "src/render/text/glyph_position.hpp"
 #include "src/text/scaler_context_cache.hpp"
 #include "src/tracing.hpp"
 
@@ -610,14 +614,11 @@ void SWCanvas::DrawGlyphsInternal(uint32_t count, const GlyphID* glyphs,
 void SWCanvas::FillGlyphs(uint32_t count, const GlyphID* glyphs,
                           const float* position_x, const float* position_y,
                           const Font& font, const Paint& paint) {
-  std::vector<const GlyphData*> glyphs_data(count);
-  font.LoadGlyphPath(glyphs, count, glyphs_data.data());
-  for (uint32_t k = 0; k < count; k++) {
-    auto& path = glyphs_data[k]->GetPath();
-
-    auto transform = Matrix::Translate(position_x[k], position_y[k]);
-
-    if (font.GetTypeface()->ContainsColorTable()) {
+  if (font.GetTypeface()->ContainsColorTable()) {
+    // Color glyphs render from their own RGBA images, unchanged.
+    std::vector<const GlyphData*> glyphs_data(count);
+    font.LoadGlyphPath(glyphs, count, glyphs_data.data());
+    for (uint32_t k = 0; k < count; k++) {
       float x = position_x[k] + glyphs_data[k]->GetHoriBearingX();
       float y = position_y[k] - glyphs_data[k]->GetHoriBearingY();
 
@@ -650,16 +651,131 @@ void SWCanvas::FillGlyphs(uint32_t count, const GlyphID* glyphs,
       this->DrawImage(Image::MakeImage(pixmap),
                       skity::Rect::MakeXYWH(x, y, w, h), SamplingOptions{},
                       nullptr);
-    } else {
-      SWRaster raster;
-
-      raster.RastePath(path, CurrentTransform() * transform,
-                       GetScanClipBounds());
-
-      DoBrush(raster, paint, false);
     }
+    return;
+  }
+
+  // Run-level eligibility for the A8 glyph mask path: solid-color fills of
+  // outline fonts on premul RGBA targets with no active path clip (rect
+  // clips are honored through the global clip bounds). Shader, color filter
+  // and stroke text keep the path pipeline.
+  const bool mask_eligible =
+      paint.GetShader() == nullptr && paint.GetColorFilter() == nullptr &&
+      bitmap_->GetAlphaType() == AlphaType::kPremul_AlphaType &&
+      bitmap_->GetColorType() == ColorType::kRGBA &&
+      !state_stack_.back().HasClip();
+
+  const Matrix ctm = CurrentTransform();
+  const Matrix22 transform22{ctm.GetScaleX(), ctm.GetSkewX(), ctm.GetSkewY(),
+                             ctm.GetScaleY()};
+  GlyphPositionRoundingSpec rounding_spec;
+  rounding_spec.is_subpixel = font.IsSubpixel();
+  rounding_spec.axis_alignment =
+      ComputeAxisAlignmentForHorizontalText(font.IsBaselineSnap(), ctm);
+  const ScalerContextDesc desc =
+      mask_eligible
+          ? ScalerContextDesc::MakeTransformed(font, paint, 1.f, transform22)
+          : ScalerContextDesc{};
+  const auto& bitmap_space = bitmap_->GetPixmap()->GetColorSpace();
+  const PMColor color_pm =
+      ColorToPMColor(Color4fToColor(paint.GetFillColor(bitmap_space)));
+  const uint8_t global_alpha = static_cast<uint8_t>(255 * paint.GetAlphaF());
+  const Rect clip = GetScanClipBounds();
+  // The rasterizer's clip window: floor on the left/top, ceil on the
+  // right/bottom (SWRaster::RastePath floors and ceils the intersected
+  // scan bounds the same way).
+  const int32_t clip_left = static_cast<int32_t>(std::floor(clip.Left()));
+  const int32_t clip_top = static_cast<int32_t>(std::floor(clip.Top()));
+  const int32_t clip_right = static_cast<int32_t>(std::ceil(clip.Right()));
+  const int32_t clip_bottom = static_cast<int32_t>(std::ceil(clip.Bottom()));
+  const int32_t surface_w = static_cast<int32_t>(bitmap_->Width());
+  const int32_t surface_h = static_cast<int32_t>(bitmap_->Height());
+
+  std::vector<uint32_t> path_glyphs;
+  for (uint32_t k = 0; k < count; k++) {
+    if (mask_eligible) {
+      const Vec2 pen{position_x[k] * ctm.GetScaleX() +
+                         position_y[k] * ctm.GetSkewX() + ctm.GetTranslateX(),
+                     position_x[k] * ctm.GetSkewY() +
+                         position_y[k] * ctm.GetScaleY() + ctm.GetTranslateY()};
+      const auto position = QuantizeGlyphPosition(pen, 1.f, rounding_spec);
+      const SWGlyphMask mask = SWGlyphAtlas::GetInstance()->GetGlyphMask(
+          font, paint, desc,
+          PackedGlyphID(glyphs[k], position.x_phase, position.y_phase));
+      if (mask.IsReady()) {
+        // The mask origin has the packed phase canceled inside, so the blit
+        // lands on the integer physical-pixel grid (position + origin is
+        // exact in float).
+        const int32_t glyph_left = static_cast<int32_t>(
+            std::lround(position.position.x + mask.origin_x));
+        const int32_t glyph_top = static_cast<int32_t>(
+            std::lround(position.position.y - mask.origin_y));
+        int32_t x0 = std::max(glyph_left, clip_left);
+        int32_t y0 = std::max(glyph_top, clip_top);
+        int32_t x1 =
+            std::min(glyph_left + static_cast<int32_t>(mask.width), clip_right);
+        int32_t y1 = std::min(glyph_top + static_cast<int32_t>(mask.height),
+                              clip_bottom);
+        x0 = std::max(x0, 0);
+        y0 = std::max(y0, 0);
+        x1 = std::min(x1, surface_w);
+        y1 = std::min(y1, surface_h);
+        if (x0 < x1 && y0 < y1) {
+          const uint8_t* mask_ptr =
+              mask.mask + static_cast<size_t>(y0 - glyph_top) * mask.stride +
+              static_cast<size_t>(x0 - glyph_left);
+#ifdef SKITY_SW_ACCEL
+          bool blended = false;
+          if (sw_accel::IsEnabled()) {
+            blended = sw_accel::BlendMaskRect(
+                paint.GetBlendMode(), color_pm, global_alpha,
+                bitmap_->GetPixelAddr(), bitmap_->RowBytes(), surface_w,
+                surface_h, x0, y0, mask_ptr, mask.stride, x1 - x0, y1 - y0);
+          }
+          if (!blended)
+#endif
+          {
+            BlendGlyphMaskRect(mask_ptr, mask.stride, x0, y0, x1 - x0, y1 - y0,
+                               bitmap_->GetPixelAddr(), bitmap_->RowBytes(),
+                               surface_w, surface_h, color_pm, global_alpha,
+                               paint.GetBlendMode());
+          }
+        }
+        continue;
+      }
+      if (mask.status == AtlasGlyphStatus::kNoImage) {
+        continue;  // inkless glyph (space)
+      }
+      // kTooLarge / kInvalidImage: fall through to the path pipeline.
+    }
+
+    path_glyphs.push_back(k);
+  }
+
+  if (path_glyphs.empty()) {
+    return;
+  }
+  // Paths are only materialized for the glyphs the mask path rejected.
+  std::vector<GlyphID> path_ids;
+  path_ids.reserve(path_glyphs.size());
+  for (uint32_t k : path_glyphs) {
+    path_ids.push_back(glyphs[k]);
+  }
+  std::vector<const GlyphData*> glyphs_data(path_glyphs.size());
+  font.LoadGlyphPath(path_ids.data(), path_ids.size(), glyphs_data.data());
+  for (size_t i = 0; i < path_glyphs.size(); i++) {
+    const uint32_t k = path_glyphs[i];
+    const auto& path = glyphs_data[i]->GetPath();
+    auto transform = Matrix::Translate(position_x[k], position_y[k]);
+
+    SWRaster raster;
+
+    raster.RastePath(path, CurrentTransform() * transform, GetScanClipBounds());
+
+    DoBrush(raster, paint, false);
   }
 }
+
 void SWCanvas::StrokeGlyphs(uint32_t count, const GlyphID* glyphs,
                             const float* position_x, const float* position_y,
                             const Font& font, const Paint& paint) {
