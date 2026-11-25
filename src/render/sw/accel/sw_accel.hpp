@@ -138,14 +138,22 @@ const uint32_t* AcquireGradientLUT(const GradientParams& params);
 // (premul ColorType::kRGBA; spans clamped to the surface). Coverage is
 // folded into each fetched color with AlphaMulQ, like the legacy brush.
 //
-// Supported today: linear and radial gradients (kSrc and kSrcOver). Like
-// FillSolidSpans, the caller must check IsEnabled() first. Returns false
-// (without touching pixels) when the gradient type or blend mode is
-// unsupported or the accelerator is unavailable (Validate fuse), in which
-// case the caller must use the legacy brush path.
+// kSrc/kSrcOver fuse the fetch and the blend in one pass. Every other mode
+// fetches each span row into a dense color buffer (the same fetch kernels)
+// and blends it through the per-pixel-src engines - the row-buffer handoff
+// keeps one blend call per chunk instead of per-pixel virtual work. The
+// cross-channel HSL modes keep a scalar blend. Like FillSolidSpans, the
+// caller must check IsEnabled() first. Returns false (without touching
+// pixels) when the gradient type or blend mode is unsupported or the
+// accelerator is unavailable (Validate fuse), in which case the caller must
+// use the legacy brush path.
 bool FillGradientSpans(const GradientParams& params, BlendMode mode,
                        uint8_t* dst_base, size_t row_bytes, int32_t width,
                        int32_t height, const Span* spans, size_t span_count);
+
+// Returns true when FillGradientSpans supports the blend mode (every mode:
+// fused kSrc/kSrcOver, variable-src engines for the rest, scalar HSL).
+bool SupportsGradientMode(BlendMode mode);
 
 // Precomputed, POD description of one image draw, built by the software
 // brush from the shader's pixmap, transform and sampling options. The

@@ -58,6 +58,28 @@ HWY_EXPORT(GradientRunRadialSrcKernel);
 HWY_EXPORT(GradientRunLinearSrcOverKernel);
 HWY_EXPORT(GradientRunRadialSrcOverKernel);
 
+HWY_EXPORT(VariableRunDstOverKernel);
+HWY_EXPORT(VariableRunSrcInKernel);
+HWY_EXPORT(VariableRunDstInKernel);
+HWY_EXPORT(VariableRunSrcOutKernel);
+HWY_EXPORT(VariableRunDstOutKernel);
+HWY_EXPORT(VariableRunSrcATopKernel);
+HWY_EXPORT(VariableRunDstATopKernel);
+HWY_EXPORT(VariableRunXorKernel);
+HWY_EXPORT(VariableRunPlusKernel);
+HWY_EXPORT(VariableRunModulateKernel);
+HWY_EXPORT(VariableRunScreenKernel);
+HWY_EXPORT(VariableRunOverlayKernel);
+HWY_EXPORT(VariableRunDarkenKernel);
+HWY_EXPORT(VariableRunLightenKernel);
+HWY_EXPORT(VariableRunColorDodgeKernel);
+HWY_EXPORT(VariableRunColorBurnKernel);
+HWY_EXPORT(VariableRunHardLightKernel);
+HWY_EXPORT(VariableRunSoftLightKernel);
+HWY_EXPORT(VariableRunDifferenceKernel);
+HWY_EXPORT(VariableRunExclusionKernel);
+HWY_EXPORT(VariableRunMultiplyKernel);
+
 HWY_EXPORT(ImageRunNearestSrcKernel);
 HWY_EXPORT(ImageRunLinearSrcKernel);
 HWY_EXPORT(ImageRunNearestSrcOverKernel);
@@ -83,6 +105,60 @@ GradientKernelFn SelectGradientKernel(const GradientParams& params,
     case BlendMode::kSrcOver:
       return radial ? HWY_DYNAMIC_DISPATCH(GradientRunRadialSrcOverKernel)
                     : HWY_DYNAMIC_DISPATCH(GradientRunLinearSrcOverKernel);
+    default:
+      return nullptr;
+  }
+}
+
+// The staged path blends rows produced by the kSrc fetch kernels with the
+// per-pixel-src engines. Mirrors the solid mode table one-for-one, with the
+// constant src alpha replaced by each pixel's own.
+using VariableKernelFn = void (*)(uint8_t*, const uint8_t*, size_t);
+
+VariableKernelFn SelectVariableKernel(BlendMode mode) {
+  switch (mode) {
+    case BlendMode::kDstOver:
+      return HWY_DYNAMIC_DISPATCH(VariableRunDstOverKernel);
+    case BlendMode::kSrcIn:
+      return HWY_DYNAMIC_DISPATCH(VariableRunSrcInKernel);
+    case BlendMode::kDstIn:
+      return HWY_DYNAMIC_DISPATCH(VariableRunDstInKernel);
+    case BlendMode::kSrcOut:
+      return HWY_DYNAMIC_DISPATCH(VariableRunSrcOutKernel);
+    case BlendMode::kDstOut:
+      return HWY_DYNAMIC_DISPATCH(VariableRunDstOutKernel);
+    case BlendMode::kSrcATop:
+      return HWY_DYNAMIC_DISPATCH(VariableRunSrcATopKernel);
+    case BlendMode::kDstATop:
+      return HWY_DYNAMIC_DISPATCH(VariableRunDstATopKernel);
+    case BlendMode::kXor:
+      return HWY_DYNAMIC_DISPATCH(VariableRunXorKernel);
+    case BlendMode::kPlus:
+      return HWY_DYNAMIC_DISPATCH(VariableRunPlusKernel);
+    case BlendMode::kModulate:
+      return HWY_DYNAMIC_DISPATCH(VariableRunModulateKernel);
+    case BlendMode::kScreen:
+      return HWY_DYNAMIC_DISPATCH(VariableRunScreenKernel);
+    case BlendMode::kOverlay:
+      return HWY_DYNAMIC_DISPATCH(VariableRunOverlayKernel);
+    case BlendMode::kDarken:
+      return HWY_DYNAMIC_DISPATCH(VariableRunDarkenKernel);
+    case BlendMode::kLighten:
+      return HWY_DYNAMIC_DISPATCH(VariableRunLightenKernel);
+    case BlendMode::kColorDodge:
+      return HWY_DYNAMIC_DISPATCH(VariableRunColorDodgeKernel);
+    case BlendMode::kColorBurn:
+      return HWY_DYNAMIC_DISPATCH(VariableRunColorBurnKernel);
+    case BlendMode::kHardLight:
+      return HWY_DYNAMIC_DISPATCH(VariableRunHardLightKernel);
+    case BlendMode::kSoftLight:
+      return HWY_DYNAMIC_DISPATCH(VariableRunSoftLightKernel);
+    case BlendMode::kDifference:
+      return HWY_DYNAMIC_DISPATCH(VariableRunDifferenceKernel);
+    case BlendMode::kExclusion:
+      return HWY_DYNAMIC_DISPATCH(VariableRunExclusionKernel);
+    case BlendMode::kMultiply:
+      return HWY_DYNAMIC_DISPATCH(VariableRunMultiplyKernel);
     default:
       return nullptr;
   }
@@ -406,7 +482,7 @@ uint32_t ReferenceImageColor(const ImageParams& p, int32_t x, int32_t y) {
 }
 
 // Coverage fold + real PorterDuffBlend over memory words, mirroring the
-// legacy BrushH -> BlendPixelH boundary.
+// legacy brush -> BlendPixelH boundary.
 uint32_t ReferenceImageBlend(BlendMode mode, uint32_t src_mem, uint32_t dst_mem,
                              uint8_t alpha) {
   const uint32_t src_pm = PMColorSwapRB(src_mem);
@@ -537,6 +613,7 @@ std::once_flag g_validate_once;
 bool g_available = false;
 
 void ValidateGradients();
+void ValidateGradientModes();
 
 void ValidateOnce() {
   // Same deterministic pattern shape as the unit tests: rows longer than a
@@ -611,6 +688,7 @@ void ValidateOnce() {
   ValidateGradients();
   ValidateImages();
   ValidateMasks();
+  ValidateGradientModes();
   g_available = true;
 }
 
@@ -716,6 +794,59 @@ void ValidateGradients() {
               }
             }
           }
+        }
+      }
+    }
+  }
+}
+
+void ValidateGradientModes() {
+  // The variable-src engines behind the staged gradient path. Each engine is
+  // driven with per-pixel src words cycling the premul patterns (sa varies
+  // within one run, covering the 0/255 shortcut boundaries) and is compared
+  // against the scalar blend of the very same words. The integer coeff
+  // engines are bit-exact; the f32 advanced engines carry a +/-1 tolerance
+  // because the scalar reference contracts its expressions into fma (even at
+  // -O0, the M2-1 finding) while the intrinsics stay uncontracted - the
+  // difference is final rounding only. kSoftLight adds Highway's NEON Sqrt
+  // rsqrte+NR approximation on top (+/-2).
+  const uint32_t srcs[] = {0x00000000u, 0x80808080u, 0xffffffffu, 0xff204060u,
+                           0x40302010u};
+  uint32_t src[71];
+  uint32_t dst[71];
+  for (size_t i = 0; i < 71; i++) {
+    src[i] = srcs[i % 5];
+    dst[i] = ColorToPMColor(static_cast<uint32_t>(i * 2654435761u));
+  }
+  const BlendMode modes[] = {
+      BlendMode::kDstOver,    BlendMode::kSrcIn,     BlendMode::kDstIn,
+      BlendMode::kSrcOut,     BlendMode::kDstOut,    BlendMode::kSrcATop,
+      BlendMode::kDstATop,    BlendMode::kXor,       BlendMode::kPlus,
+      BlendMode::kModulate,   BlendMode::kScreen,    BlendMode::kOverlay,
+      BlendMode::kDarken,     BlendMode::kLighten,   BlendMode::kColorDodge,
+      BlendMode::kColorBurn,  BlendMode::kHardLight, BlendMode::kSoftLight,
+      BlendMode::kDifference, BlendMode::kExclusion, BlendMode::kMultiply,
+  };
+  for (BlendMode mode : modes) {
+    VariableKernelFn kernel = SelectVariableKernel(mode);
+    if (kernel == nullptr) {
+      return;  // dispatch table incomplete - fail the fuse
+    }
+    uint32_t out[71];
+    memcpy(out, dst, sizeof(out));
+    kernel(reinterpret_cast<uint8_t*>(out),
+           reinterpret_cast<const uint8_t*>(src), 71);
+    const int32_t tolerance = mode == BlendMode::kSoftLight ? 2
+                              : mode >= BlendMode::kOverlay ? 1
+                                                            : 0;
+    for (size_t i = 0; i < 71; i++) {
+      const uint32_t expect =
+          ReferenceBlend(mode, PMColorSwapRB(src[i]), dst[i], 255);
+      for (int shift = 0; shift < 32; shift += 8) {
+        const int32_t d = static_cast<int32_t>((out[i] >> shift) & 0xff) -
+                          static_cast<int32_t>((expect >> shift) & 0xff);
+        if ((d < 0 ? -d : d) > tolerance) {
+          return;
         }
       }
     }
@@ -908,10 +1039,41 @@ bool FillGradientSpans(const GradientParams& params, BlendMode mode,
   if (!Available()) {
     return false;
   }
-  GradientKernelFn kernel = SelectGradientKernel(params, mode);
-  if (kernel == nullptr) {
-    return false;
+  // r = d: nothing to write.
+  if (mode == BlendMode::kDst) {
+    return true;
   }
+  const bool fused = mode == BlendMode::kSrc || mode == BlendMode::kSrcOver;
+  GradientKernelFn kernel = nullptr;
+  if (fused) {
+    kernel = SelectGradientKernel(params, mode);
+    if (kernel == nullptr) {
+      return false;
+    }
+  }
+  // The remaining modes fetch each span row into a dense color buffer with
+  // the kSrc kernels and blend it through the variable-src engines; the
+  // cross-channel HSL modes keep a scalar blend (no interleaved-lane engine).
+  const bool hsl = !fused && mode >= BlendMode::kHue;
+  VariableKernelFn variable = nullptr;
+  if (!fused && !hsl && mode != BlendMode::kClear) {
+    variable = SelectVariableKernel(mode);
+    if (variable == nullptr) {
+      return false;
+    }
+  }
+  const bool fetch = !fused && mode != BlendMode::kClear;
+  GradientKernelFn fetch_kernel = nullptr;
+  if (fetch) {
+    fetch_kernel = params.type == 1
+                       ? HWY_DYNAMIC_DISPATCH(GradientRunRadialSrcKernel)
+                       : HWY_DYNAMIC_DISPATCH(GradientRunLinearSrcKernel);
+  }
+  // Stack staging for the dense color rows; long spans fetch and blend in
+  // chunks so the buffer stays fixed-size.
+  constexpr int32_t kStagedChunk = 512;
+  alignas(64) uint32_t staged[kStagedChunk];
+
   for (size_t i = 0; i < span_count; i++) {
     int32_t x = spans[i].x;
     int32_t y = spans[i].y;
@@ -929,15 +1091,45 @@ bool FillGradientSpans(const GradientParams& params, BlendMode mode,
     if (len <= 0) {
       continue;
     }
-    // BrushH folds the span cover with MulDiv255Round against the brush's
+    // The brush folds the span cover with MulDiv255Round against the brush's
     // global alpha; the gradient brushes always pass global alpha 1.0, so
     // the folded value is the raw cover.
     const uint32_t cover = static_cast<uint32_t>(spans[i].cover) & 0xffu;
-    kernel(dst_base + static_cast<size_t>(y) * row_bytes +
-               static_cast<size_t>(x) * 4,
-           &params, x, y, static_cast<size_t>(len), cover);
+    uint8_t* dst = dst_base + static_cast<size_t>(y) * row_bytes +
+                   static_cast<size_t>(x) * 4;
+    if (mode == BlendMode::kClear) {
+      memset(dst, 0, static_cast<size_t>(len) * 4);
+      continue;
+    }
+    if (fused) {
+      kernel(dst, &params, x, y, static_cast<size_t>(len), cover);
+      continue;
+    }
+    for (int32_t off = 0; off < len; off += kStagedChunk) {
+      const int32_t n = std::min(kStagedChunk, len - off);
+      fetch_kernel(reinterpret_cast<uint8_t*>(staged), &params, x + off, y,
+                   static_cast<size_t>(n), cover);
+      uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst) + off;
+      if (hsl) {
+        for (int32_t k = 0; k < n; k++) {
+          dst32[k] = PMColorSwapRB(PorterDuffBlend(
+              PMColorSwapRB(staged[k]), PMColorSwapRB(dst32[k]), mode));
+        }
+      } else {
+        variable(reinterpret_cast<uint8_t*>(dst32),
+                 reinterpret_cast<const uint8_t*>(staged),
+                 static_cast<size_t>(n));
+      }
+    }
   }
   return true;
+}
+
+bool SupportsGradientMode(BlendMode mode) {
+  // Every mode is served: kSrc/kSrcOver through the fused kernels, the other
+  // coeff modes through the variable-src engines, the separable advanced
+  // modes in f32, and the cross-channel HSL modes as scalar loops.
+  return mode <= BlendMode::kLastMode;
 }
 
 bool SupportsImageMode(BlendMode mode) {

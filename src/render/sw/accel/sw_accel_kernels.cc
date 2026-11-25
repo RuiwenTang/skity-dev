@@ -828,7 +828,7 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
         c16hi,
         hn::BitCast(d16, hn::ShiftRight<8>(hn::BitCast(di16, scaled_hi))));
     if (cover != 255) {
-      // BrushH coverage fold: AlphaMulQ, truncating per channel.
+      // Brush coverage fold: AlphaMulQ, truncating per channel.
       w16lo = ScaleMul(w16lo, cover16);
       w16hi = ScaleMul(w16hi, cover16);
     }
@@ -880,6 +880,333 @@ void GradientRunRadialSrcOverKernel(uint8_t* HWY_RESTRICT dst,
                                     const GradientParams* gp, int32_t x,
                                     int32_t y, size_t count, uint32_t cover) {
   GradientRunKernelT<true, true>(dst, gp, x, y, count, cover);
+}
+
+// ---------------------------------------------------------------------------
+// Variable-src blend engines (staged gradient rows)
+// ---------------------------------------------------------------------------
+
+// The staged gradient path fetches each span into a dense row of premul
+// memory words with the kSrc fetch kernels (GradientRun*SrcKernel), then
+// blends that row with the mode below. The rows are exact-length, so full
+// vector groups plus a scalar tail replace the masked-store machinery of the
+// fused kernels. Engines are per-pixel-src generalizations of the solid
+// kernels: every per-pixel result equals the scalar PorterDuffBlend for that
+// pixel's own src (the Validate fuse sweeps per-pixel src words through the
+// shortcut boundaries).
+//
+// The kSrcOver case keeps its fused kernel (fetch and blend in one pass over
+// dst, no staging round trip); kClear and kDst need no src at all and are
+// handled at dispatch.
+
+// TermScale with a per-pixel src alpha: kInvSrcA and kSrcA derive from each
+// pixel's own alpha instead of a run-wide constant.
+template <ScaleKind K, class D16, class V16>
+static inline V16 VarTermScale(D16 d16, V16 da16, V16 sa16) {
+  if constexpr (K == ScaleKind::kOne) {
+    return hn::Set(d16, uint16_t{256});
+  } else if constexpr (K == ScaleKind::kInvSrcA) {
+    return hn::Sub(hn::Set(d16, uint16_t{256}), sa16);
+  } else if constexpr (K == ScaleKind::kSrcA) {
+    return hn::Add(sa16, hn::Set(d16, uint16_t{1}));
+  } else if constexpr (K == ScaleKind::kInvDstA) {
+    return hn::Sub(hn::Set(d16, uint16_t{256}), da16);
+  } else if constexpr (K == ScaleKind::kDstA) {
+    return hn::Add(da16, hn::Set(d16, uint16_t{1}));
+  } else {
+    return hn::Zero(d16);
+  }
+}
+
+template <BlendMode MODE, ScaleKind SRC, ScaleKind DST>
+static void VariableCoeffRunT(uint8_t* HWY_RESTRICT dst,
+                              const uint8_t* HWY_RESTRICT src, size_t count) {
+  constexpr bool kNeedsSrcA =
+      SRC == ScaleKind::kInvSrcA || SRC == ScaleKind::kSrcA ||
+      DST == ScaleKind::kInvSrcA || DST == ScaleKind::kSrcA;
+  constexpr bool kNeedsDstA =
+      SRC == ScaleKind::kInvDstA || SRC == ScaleKind::kDstA ||
+      DST == ScaleKind::kInvDstA || DST == ScaleKind::kDstA;
+
+  const hn::ScalableTag<uint8_t> d8;
+  const hn::Half<decltype(d8)> d8h;
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
+  const size_t vl = hn::Lanes(d8);
+
+  uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst);
+  const uint32_t* src32 = reinterpret_cast<const uint32_t*>(src);
+  size_t px = 0;
+  for (; px + vl / 4 <= count; px += vl / 4) {
+    const auto s8 = hn::LoadU(d8, src + px * 4);
+    const auto d8v = hn::LoadU(d8, dst + px * 4);
+    const auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, s8));
+    const auto s_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, s8));
+    const auto d_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, d8v));
+    const auto d_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, d8v));
+    auto sa_lo = hn::Zero(d16);
+    auto sa_hi = hn::Zero(d16);
+    if constexpr (kNeedsSrcA) {
+      const auto sa8 = BroadcastLaneByte(d8, s8, 3);
+      sa_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, sa8));
+      sa_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, sa8));
+    }
+    auto da_lo = hn::Zero(d16);
+    auto da_hi = hn::Zero(d16);
+    if constexpr (kNeedsDstA) {
+      const auto da8 = BroadcastLaneByte(d8, d8v, 3);
+      da_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, da8));
+      da_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, da8));
+    }
+    const auto term_add = [&](const auto& src16, const auto& dst16,
+                              const auto& sa16, const auto& da16) {
+      return hn::Add(ScaleMul(src16, VarTermScale<SRC>(d16, da16, sa16)),
+                     ScaleMul(dst16, VarTermScale<DST>(d16, da16, sa16)));
+    };
+    const auto r_lo = term_add(s_lo, d_lo, sa_lo, da_lo);
+    const auto r_hi = term_add(s_hi, d_hi, sa_hi, da_hi);
+    hn::StoreU(
+        hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo)),
+        d8, dst + px * 4);
+  }
+  for (; px < count; px++) {
+    dst32[px] = PMColorSwapRB(PorterDuffBlend(PMColorSwapRB(src32[px]),
+                                              PMColorSwapRB(dst32[px]), MODE));
+  }
+}
+
+// The three dedicated coeff shapes (saturating add, rounding product,
+// screen), parameterized over the per-group combine like SolidRun*.
+template <BlendMode MODE>
+static void VariableByteRunT(uint8_t* HWY_RESTRICT dst,
+                             const uint8_t* HWY_RESTRICT src, size_t count) {
+  const hn::ScalableTag<uint8_t> d8;
+  const hn::Half<decltype(d8)> d8h;
+  const hn::Rebind<uint16_t, decltype(d8h)> d16;
+  const size_t vl = hn::Lanes(d8);
+  const auto k255 = hn::Set(d16, uint16_t{255});
+
+  uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst);
+  const uint32_t* src32 = reinterpret_cast<const uint32_t*>(src);
+  size_t px = 0;
+  for (; px + vl / 4 <= count; px += vl / 4) {
+    const auto s8 = hn::LoadU(d8, src + px * 4);
+    const auto d8v = hn::LoadU(d8, dst + px * 4);
+    const auto s_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, s8));
+    const auto s_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, s8));
+    const auto d_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, d8v));
+    const auto d_hi = hn::PromoteTo(d16, hn::UpperHalf(d8h, d8v));
+    hn::Vec<decltype(d16)> r_lo;
+    hn::Vec<decltype(d16)> r_hi;
+    if constexpr (MODE == BlendMode::kPlus) {
+      // r = min(s + d, 255) per channel (saturating add).
+      r_lo = hn::Min(hn::Add(s_lo, d_lo), k255);
+      r_hi = hn::Min(hn::Add(s_hi, d_hi), k255);
+    } else if constexpr (MODE == BlendMode::kModulate) {
+      // r = s * d per channel (MulDiv255Round rounding product).
+      r_lo = RoundMul(s_lo, d_lo);
+      r_hi = RoundMul(s_hi, d_hi);
+    } else {
+      // kScreen: r = s + d - s * d per channel.
+      r_lo = hn::Sub(hn::Add(s_lo, d_lo), RoundMul(s_lo, d_lo));
+      r_hi = hn::Sub(hn::Add(s_hi, d_hi), RoundMul(s_hi, d_hi));
+    }
+    hn::StoreU(
+        hn::Combine(d8, hn::TruncateTo(d8h, r_hi), hn::TruncateTo(d8h, r_lo)),
+        d8, dst + px * 4);
+  }
+  for (; px < count; px++) {
+    dst32[px] = PMColorSwapRB(PorterDuffBlend(PMColorSwapRB(src32[px]),
+                                              PMColorSwapRB(dst32[px]), MODE));
+  }
+}
+
+// Variable-src separable advanced modes: same f32 lane layout and component
+// formulas as AdvancedRunKernelT, with sf/saf loaded from the staged row
+// instead of a broadcast constant. Quantization and the composite alpha are
+// identical to the solid engine.
+template <BlendMode MODE>
+static void VariableAdvancedRunT(uint8_t* HWY_RESTRICT dst,
+                                 const uint8_t* HWY_RESTRICT src,
+                                 size_t count) {
+  const hn::ScalableTag<uint8_t> d8;
+  const hn::Half<hn::Half<decltype(d8)>> df8;
+  const hn::Rebind<uint32_t, decltype(df8)> du32;
+  const hn::Rebind<float, decltype(df8)> df32;
+  const size_t vl = hn::Lanes(d8);
+  const size_t sub = hn::Lanes(df8);  // f32 lanes per sub-chunk
+
+  const auto k255f = hn::Set(df32, 255.0f);
+  const auto kHalf = hn::Set(df32, 0.5f);
+  const auto kOne = hn::Set(df32, 1.0f);
+  const auto zero32 = hn::Zero(du32);
+
+  // Lane mask selecting each pixel's alpha byte.
+  const auto alpha_lanes =
+      hn::Eq(hn::And(hn::Iota(df8, 0), hn::Set(df8, uint8_t{3})),
+             hn::Set(df8, uint8_t{3}));
+
+  uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst);
+  const uint32_t* src32 = reinterpret_cast<const uint32_t*>(src);
+  size_t px = 0;
+  for (; px + vl / 4 <= count; px += vl / 4) {
+    for (size_t off = 0; off < vl; off += sub) {
+      const auto s8 = hn::LoadU(df8, src + px * 4 + off);
+      const auto d8c = hn::LoadU(df8, dst + px * 4 + off);
+      const auto sa8 = BroadcastLaneByte(df8, s8, 3);
+      const auto da8 = BroadcastLaneByte(df8, d8c, 3);
+      const auto sf =
+          hn::Div(hn::ConvertTo(df32, hn::PromoteTo(du32, s8)), k255f);
+      const auto df =
+          hn::Div(hn::ConvertTo(df32, hn::PromoteTo(du32, d8c)), k255f);
+      const auto saf =
+          hn::Div(hn::ConvertTo(df32, hn::PromoteTo(du32, sa8)), k255f);
+      const auto daf =
+          hn::Div(hn::ConvertTo(df32, hn::PromoteTo(du32, da8)), k255f);
+
+      const auto rf = AdvancedComponent<MODE>(sf, saf, df, daf);
+      auto af = hn::Add(saf, hn::Mul(hn::Sub(kOne, saf), daf));
+      if constexpr (MODE == BlendMode::kSoftLight) {
+        af = hn::IfThenElse(hn::Eq(daf, hn::Zero(df32)), saf, af);
+      }
+
+      const auto quantize = [&](const hn::Vec<decltype(df32)> v) {
+        const auto clamped = hn::Min(kOne, hn::Max(hn::Zero(df32), v));
+        return hn::ConvertTo(du32, hn::Add(hn::Mul(clamped, k255f), kHalf));
+      };
+      const auto qc = quantize(rf);
+      const auto qa = quantize(af);
+      const auto out8 = hn::IfThenElse(alpha_lanes, hn::TruncateTo(df8, qa),
+                                       hn::TruncateTo(df8, qc));
+      hn::StoreU(out8, df8, dst + px * 4 + off);
+    }
+  }
+  for (; px < count; px++) {
+    dst32[px] = PMColorSwapRB(PorterDuffBlend(PMColorSwapRB(src32[px]),
+                                              PMColorSwapRB(dst32[px]), MODE));
+  }
+}
+
+// kDstOver: r = d + (1 - da) * s
+void VariableRunDstOverKernel(uint8_t* HWY_RESTRICT dst,
+                              const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableCoeffRunT<BlendMode::kDstOver, ScaleKind::kInvDstA, ScaleKind::kOne>(
+      dst, src, count);
+}
+
+// kSrcIn: r = s * da
+void VariableRunSrcInKernel(uint8_t* HWY_RESTRICT dst,
+                            const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableCoeffRunT<BlendMode::kSrcIn, ScaleKind::kDstA, ScaleKind::kZero>(
+      dst, src, count);
+}
+
+// kDstIn: r = d * sa
+void VariableRunDstInKernel(uint8_t* HWY_RESTRICT dst,
+                            const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableCoeffRunT<BlendMode::kDstIn, ScaleKind::kZero, ScaleKind::kSrcA>(
+      dst, src, count);
+}
+
+// kSrcOut: r = s * (1 - da)
+void VariableRunSrcOutKernel(uint8_t* HWY_RESTRICT dst,
+                             const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableCoeffRunT<BlendMode::kSrcOut, ScaleKind::kInvDstA, ScaleKind::kZero>(
+      dst, src, count);
+}
+
+// kDstOut: r = d * (1 - sa)
+void VariableRunDstOutKernel(uint8_t* HWY_RESTRICT dst,
+                             const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableCoeffRunT<BlendMode::kDstOut, ScaleKind::kZero, ScaleKind::kInvSrcA>(
+      dst, src, count);
+}
+
+// kSrcATop: r = s * da + d * (1 - sa)
+void VariableRunSrcATopKernel(uint8_t* HWY_RESTRICT dst,
+                              const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableCoeffRunT<BlendMode::kSrcATop, ScaleKind::kDstA, ScaleKind::kInvSrcA>(
+      dst, src, count);
+}
+
+// kDstATop: r = d * sa + s * (1 - da)
+void VariableRunDstATopKernel(uint8_t* HWY_RESTRICT dst,
+                              const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableCoeffRunT<BlendMode::kDstATop, ScaleKind::kInvDstA, ScaleKind::kSrcA>(
+      dst, src, count);
+}
+
+// kXor: r = s * (1 - da) + d * (1 - sa)
+void VariableRunXorKernel(uint8_t* HWY_RESTRICT dst,
+                          const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableCoeffRunT<BlendMode::kXor, ScaleKind::kInvDstA, ScaleKind::kInvSrcA>(
+      dst, src, count);
+}
+
+void VariableRunPlusKernel(uint8_t* HWY_RESTRICT dst,
+                           const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableByteRunT<BlendMode::kPlus>(dst, src, count);
+}
+
+void VariableRunModulateKernel(uint8_t* HWY_RESTRICT dst,
+                               const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableByteRunT<BlendMode::kModulate>(dst, src, count);
+}
+
+void VariableRunScreenKernel(uint8_t* HWY_RESTRICT dst,
+                             const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableByteRunT<BlendMode::kScreen>(dst, src, count);
+}
+
+void VariableRunOverlayKernel(uint8_t* HWY_RESTRICT dst,
+                              const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableAdvancedRunT<BlendMode::kOverlay>(dst, src, count);
+}
+
+void VariableRunDarkenKernel(uint8_t* HWY_RESTRICT dst,
+                             const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableAdvancedRunT<BlendMode::kDarken>(dst, src, count);
+}
+
+void VariableRunLightenKernel(uint8_t* HWY_RESTRICT dst,
+                              const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableAdvancedRunT<BlendMode::kLighten>(dst, src, count);
+}
+
+void VariableRunColorDodgeKernel(uint8_t* HWY_RESTRICT dst,
+                                 const uint8_t* HWY_RESTRICT src,
+                                 size_t count) {
+  VariableAdvancedRunT<BlendMode::kColorDodge>(dst, src, count);
+}
+
+void VariableRunColorBurnKernel(uint8_t* HWY_RESTRICT dst,
+                                const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableAdvancedRunT<BlendMode::kColorBurn>(dst, src, count);
+}
+
+void VariableRunHardLightKernel(uint8_t* HWY_RESTRICT dst,
+                                const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableAdvancedRunT<BlendMode::kHardLight>(dst, src, count);
+}
+
+void VariableRunSoftLightKernel(uint8_t* HWY_RESTRICT dst,
+                                const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableAdvancedRunT<BlendMode::kSoftLight>(dst, src, count);
+}
+
+void VariableRunDifferenceKernel(uint8_t* HWY_RESTRICT dst,
+                                 const uint8_t* HWY_RESTRICT src,
+                                 size_t count) {
+  VariableAdvancedRunT<BlendMode::kDifference>(dst, src, count);
+}
+
+void VariableRunExclusionKernel(uint8_t* HWY_RESTRICT dst,
+                                const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableAdvancedRunT<BlendMode::kExclusion>(dst, src, count);
+}
+
+void VariableRunMultiplyKernel(uint8_t* HWY_RESTRICT dst,
+                               const uint8_t* HWY_RESTRICT src, size_t count) {
+  VariableAdvancedRunT<BlendMode::kMultiply>(dst, src, count);
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,7 +1463,7 @@ static void ImageRunKernelT(uint8_t* HWY_RESTRICT dst, const ImageParams* ip,
       s_hi = hn::IfThenElse(alpha_lanes, s_hi, RoundMul(s_hi, a_hi));
     }
     if (alpha != 255) {
-      // BrushH coverage fold: AlphaMulQ, truncating per channel.
+      // Brush coverage fold: AlphaMulQ, truncating per channel.
       const auto cover16 = hn::Set(d16, static_cast<uint16_t>(alpha));
       s_lo = ScaleMul(s_lo, cover16);
       s_hi = ScaleMul(s_hi, cover16);
