@@ -13,12 +13,17 @@
 #include <skity/graphic/bitmap.hpp>
 #include <skity/graphic/paint.hpp>
 #include <skity/render/canvas.hpp>
+#include <skity/text/font.hpp>
+#include <skity/text/text_blob.hpp>
 #include <vector>
 
 #include "src/graphic/bitmap_sampler.hpp"
 #include "src/graphic/blend_mode_priv.hpp"
 #include "src/graphic/color_priv.hpp"
 #include "src/render/sw/accel/sw_accel.hpp"
+#include "src/render/sw/sw_glyph_atlas.hpp"
+#include "src/render/sw/sw_render_target.hpp"
+#include "src/text/scaler_context_desc.hpp"
 
 namespace {
 
@@ -927,6 +932,138 @@ TEST(SWAccel, ImageCanvasAccelMatchesLegacy) {
         << "pixel " << i << " (x " << (i % kW) << ", y " << (i / kW) << ")"
         << std::hex << ": legacy " << lp[i] << " accel " << ap[i];
   }
+}
+
+// ---------------------------------------------------------------------------
+// Glyph masks
+// ---------------------------------------------------------------------------
+
+// The mask kernels must agree to the bit with BlendGlyphMaskRect - the same
+// scalar chain the canvas falls back to (MulDiv255Round coverage/global-alpha
+// fold, AlphaMulQ into the color with the full-coverage lanes skipped, real
+// PorterDuffBlend).
+TEST(SWAccel, MaskRectMatchesScalarChain) {
+  constexpr int32_t kMaskW = 37;  // spans the vector and the scalar tail
+  constexpr int32_t kMaskH = 9;
+  std::vector<uint8_t> mask(kMaskW * kMaskH);
+  uint32_t state = 0x9e3779b9u;
+  for (auto& value : mask) {
+    // Coverage edges: full, empty, and the truncation-sensitive middles.
+    static const uint8_t kEdges[] = {0, 1, 64, 128, 200, 254, 255};
+    value = kEdges[(NextRandom(state)) % 7];
+  }
+
+  for (skity::BlendMode mode :
+       {skity::BlendMode::kSrc, skity::BlendMode::kSrcOver}) {
+    for (uint8_t global_alpha : {255, 128, 1}) {
+      std::vector<uint32_t> expect(kMaskW * kMaskH);
+      for (auto& px : expect) {
+        px = RandomColor(state);
+      }
+      std::vector<uint32_t> actual = expect;
+      skity::BlendGlyphMaskRect(mask.data(), kMaskW, 0, 0, kMaskW, kMaskH,
+                                reinterpret_cast<uint8_t*>(expect.data()),
+                                kMaskW * 4, kMaskW, kMaskH, 0xff204060u,
+                                global_alpha, mode);
+      ASSERT_TRUE(skity::sw_accel::BlendMaskRect(
+          mode, 0xff204060u, global_alpha,
+          reinterpret_cast<uint8_t*>(actual.data()), kMaskW * 4, kMaskW, kMaskH,
+          0, 0, mask.data(), kMaskW, kMaskW, kMaskH));
+      for (size_t i = 0; i < expect.size(); i++) {
+        ASSERT_EQ(expect[i], actual[i])
+            << "mode " << static_cast<int>(mode) << " alpha "
+            << static_cast<int>(global_alpha) << " pixel " << i;
+      }
+    }
+  }
+
+  // A rect larger than the destination is clipped to the surface with the
+  // mask pointer shifted along, matching the scalar clip.
+  std::vector<uint32_t> expect(kWidth * kHeight);
+  for (auto& px : expect) {
+    px = RandomColor(state);
+  }
+  std::vector<uint32_t> actual = expect;
+  skity::BlendGlyphMaskRect(mask.data(), kMaskW, -4, -2, kMaskW, kMaskH,
+                            reinterpret_cast<uint8_t*>(expect.data()),
+                            kWidth * 4, kWidth, kHeight, 0xff204060u, 200,
+                            skity::BlendMode::kSrcOver);
+  ASSERT_TRUE(skity::sw_accel::BlendMaskRect(
+      skity::BlendMode::kSrcOver, 0xff204060u, 200,
+      reinterpret_cast<uint8_t*>(actual.data()), kWidth * 4, kWidth, kHeight,
+      -4, -2, mask.data(), kMaskW, kMaskW, kMaskH));
+  for (size_t i = 0; i < expect.size(); i++) {
+    ASSERT_EQ(expect[i], actual[i]) << "clipped pixel " << i;
+  }
+}
+
+void DrawTextScene(skity::Canvas* canvas) {
+  auto typeface = skity::Typeface::GetDefaultTypeface();
+  ASSERT_TRUE(typeface);
+  skity::Paint paint;
+  paint.SetTypeface(typeface);
+  paint.SetTextSize(24.f);
+  paint.SetAntiAlias(true);
+  paint.SetColor(skity::Color_BLACK);
+  auto blob =
+      skity::TextBlobBuilder().BuildTextBlob("Hello glyph atlas", paint);
+  ASSERT_TRUE(blob);
+  // Solid fill through the mask atlas.
+  canvas->DrawTextBlob(blob.get(), 4.f, 28.f, paint);
+  // Translucent fill: the coverage folds against the paint alpha.
+  paint.SetAlphaF(0.5f);
+  canvas->DrawTextBlob(blob.get(), 4.f, 56.f, paint);
+  paint.SetAlphaF(1.f);
+}
+
+// Canvas-level A/B: the same text scene with the SIMD mask blend on and off
+// must be pixel-identical (both arms take the glyph atlas; only the blend
+// kernel differs). The glyph atlas is process-wide, so both arms share the
+// cached masks.
+TEST(SWAccel, TextCanvasAccelMatchesLegacy) {
+  auto typeface = skity::Typeface::GetDefaultTypeface();
+  if (typeface == nullptr) {
+    GTEST_SKIP() << "no default typeface on this host";
+  }
+  constexpr int32_t kW = 128;
+  constexpr int32_t kH = 72;
+
+  skity::sw_accel::SetEnabled(false);
+  skity::Bitmap legacy(kW, kH, skity::AlphaType::kPremul_AlphaType);
+  auto legacy_canvas = skity::Canvas::MakeSoftwareCanvas(&legacy);
+  legacy_canvas->DrawColor(skity::ColorSetARGB(255, 240, 240, 240));
+  DrawTextScene(legacy_canvas.get());
+  skity::sw_accel::SetEnabled(true);
+
+  skity::Bitmap accel(kW, kH, skity::AlphaType::kPremul_AlphaType);
+  auto accel_canvas = skity::Canvas::MakeSoftwareCanvas(&accel);
+  accel_canvas->DrawColor(skity::ColorSetARGB(255, 240, 240, 240));
+  DrawTextScene(accel_canvas.get());
+
+  // Anti-degenerate: the atlas must have actually served the glyphs (a
+  // broken eligibility gate would silently run both arms through the path
+  // pipeline and the test would still pass).
+  auto typeface_ptr = typeface;
+  skity::Font font(typeface_ptr, 24.f);
+  const skity::GlyphID glyph = typeface_ptr->UnicharToGlyph('H');
+  const auto desc =
+      skity::ScalerContextDesc::MakeCanonicalized(font, skity::Paint());
+  const auto cached = skity::SWGlyphAtlas::GetInstance()->GetGlyphMask(
+      font, skity::Paint(), desc, skity::PackedGlyphID(glyph));
+  ASSERT_TRUE(cached.IsReady()) << "the glyph atlas did not serve the scene";
+
+  const uint32_t* lp = reinterpret_cast<const uint32_t*>(legacy.GetPixelAddr());
+  const uint32_t* ap = reinterpret_cast<const uint32_t*>(accel.GetPixelAddr());
+  int64_t differing = 0;
+  for (size_t i = 0; i < static_cast<size_t>(kW) * kH; i++) {
+    if (lp[i] != ap[i]) {
+      differing++;
+      ASSERT_EQ(lp[i], ap[i])
+          << "pixel " << i << " (x " << (i % kW) << ", y " << (i / kW) << ")"
+          << std::hex << ": legacy " << lp[i] << " accel " << ap[i];
+    }
+  }
+  (void)differing;
 }
 
 #endif  // SKITY_SW_ACCEL
