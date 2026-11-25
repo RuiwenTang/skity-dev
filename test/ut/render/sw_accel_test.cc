@@ -215,7 +215,7 @@ constexpr float kTestNearlyZero = 1.0f / (1 << 12);
 
 // Independent scalar mirror of the legacy gradient chain, written from the
 // GradientColorBrush source (LerpColor + Color4fToColor + ColorToPMColor +
-// the BrushH coverage fold). Produces the same memory word (0xAABBGGRR)
+// the brush coverage fold). Produces the same memory word (0xAABBGGRR)
 // FillGradientSpans stores for kSrc.
 struct TestGradient {
   int type = 0;  // 0 linear, 1 radial
@@ -466,6 +466,89 @@ TEST(SWAccel, GradientFetchMatchesScalarReference) {
   EXPECT_GT(exact * 100 / total, 80);
 }
 
+// Every mode must blend the very words the fetch produced: a kSrc run
+// captures the staged path's input, so the fused, staged, HSL, kClear and
+// kDst outputs must all equal the real PorterDuffBlend of those words
+// against the destination - bit-exactly for the integer coeff engines and
+// the scalar HSL loops, within +/-1 per channel for the f32 advanced modes
+// (the scalar reference contracts into fma while the intrinsics stay
+// uncontracted - final rounding only; see ValidateGradientModes), +/-2 for
+// SoftLight's approximate NEON Sqrt. This locks the dispatch wiring, the
+// chunked fetch -> blend handoff and the per-pixel-src engines end to end,
+// including spans longer than the 512 pixel staging chunk.
+TEST(SWAccel, GradientStagedModesBlendOwnFetch) {
+  uint32_t state = 0xc2b2ae3du;
+  constexpr int32_t kW = 1030;
+  constexpr int32_t kH = 5;
+  std::vector<BlendMode> modes;
+  for (int m = 0; m <= static_cast<int>(BlendMode::kLastMode); m++) {
+    modes.push_back(static_cast<BlendMode>(m));
+  }
+
+  for (int round = 0; round < 4; round++) {
+    const TestGradient g = RandomGradient(state);
+    std::vector<float> seg_start, seg_end, colors;
+    std::vector<uint32_t> lut;
+    const skity::sw_accel::GradientParams p =
+        ToParams(g, &seg_start, &seg_end, &colors, &lut);
+    ASSERT_NE(nullptr, p.lut);
+    const uint8_t cover = round % 2 == 0 ? 255u : 137u;
+
+    std::vector<Span> spans;
+    for (int32_t y = 0; y < kH; y++) {
+      spans.push_back(Span{0, y, kW, cover});
+    }
+
+    std::vector<uint32_t> fetched(kW * kH);
+    ASSERT_TRUE(skity::sw_accel::FillGradientSpans(
+        p, BlendMode::kSrc, reinterpret_cast<uint8_t*>(fetched.data()), kW * 4,
+        kW, kH, spans.data(), spans.size()));
+
+    for (BlendMode mode : modes) {
+      std::vector<uint32_t> actual(kW * kH);
+      for (auto& px : actual) {
+        px = RandomColor(state);
+      }
+      const std::vector<uint32_t> dst = actual;
+      ASSERT_TRUE(skity::sw_accel::FillGradientSpans(
+          p, mode, reinterpret_cast<uint8_t*>(actual.data()), kW * 4, kW, kH,
+          spans.data(), spans.size()));
+      const int32_t tolerance = mode == BlendMode::kSoftLight ? 2
+                                : mode >= BlendMode::kOverlay ? 1
+                                                              : 0;
+      for (int32_t y = 0; y < kH; y++) {
+        for (int32_t x = 0; x < kW; x++) {
+          const size_t idx = static_cast<size_t>(y) * kW + x;
+          const uint32_t want = skity::PMColorSwapRB(
+              skity::PorterDuffBlend(skity::PMColorSwapRB(fetched[idx]),
+                                     skity::PMColorSwapRB(dst[idx]), mode));
+          const uint32_t got = actual[idx];
+          if (tolerance == 0) {
+            ASSERT_EQ(want, got) << "round " << round << " mode "
+                                 << static_cast<int>(mode) << " pixel " << idx;
+          } else {
+            for (int shift = 0; shift < 32; shift += 8) {
+              const int32_t d = static_cast<int32_t>((got >> shift) & 0xff) -
+                                static_cast<int32_t>((want >> shift) & 0xff);
+              ASSERT_LE(d < 0 ? -d : d, tolerance)
+                  << "round " << round << " mode " << static_cast<int>(mode)
+                  << " pixel " << idx << " shift " << shift;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(SWAccel, SupportsGradientModeCoversEveryMode) {
+  // The staged path completes the table: every BlendMode value is served.
+  for (int m = 0; m <= static_cast<int>(BlendMode::kLastMode); m++) {
+    EXPECT_TRUE(
+        skity::sw_accel::SupportsGradientMode(static_cast<BlendMode>(m)));
+  }
+}
+
 namespace {
 
 // A scene exercising every accelerated gradient configuration plus a sweep
@@ -688,6 +771,87 @@ TEST(SWAccel, GradientCanvasAccelMatchesLegacy) {
                              "the runtime switch did not reach the renderer";
   EXPECT_GT(legacy_gradient_pixels, static_cast<int64_t>(kW) * kH / 4)
       << "the scalar gradient fallback did not paint";
+}
+
+namespace {
+
+// Advanced-blend gradient draws: every mode here rides the staged path on
+// the accel arm (the fused modes are covered by DrawGradientScene). Modes
+// with divisions (ColorDodge/ColorBurn) and the sqrt-approximated SoftLight
+// stay out of this +/-4 canvas comparison - their branch thresholds could
+// flip on the LUT's rounding headroom; GradientStagedModesBlendOwnFetch
+// covers them bit-exactly instead.
+void DrawGradientAdvancedScene(skity::Canvas* canvas) {
+  skity::Point pts[] = {{4.f, 4.f, 0.f, 1.f}, {74.f, 52.f, 0.f, 1.f}};
+  const skity::Vec4 colors[] = {
+      skity::Vec4{0.9f, 0.1f, 0.2f, 1.f},
+      skity::Vec4{0.1f, 0.8f, 0.3f, 0.7f},
+      skity::Vec4{0.2f, 0.3f, 0.9f, 1.f},
+  };
+  const skity::BlendMode modes[] = {
+      skity::BlendMode::kMultiply,   skity::BlendMode::kScreen,
+      skity::BlendMode::kOverlay,    skity::BlendMode::kDarken,
+      skity::BlendMode::kDifference, skity::BlendMode::kPlus,
+  };
+  skity::Paint paint;
+  paint.SetAntiAlias(true);
+  for (int row = 0; row < 3; row++) {
+    for (size_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m++) {
+      paint.SetBlendMode(modes[m]);
+      paint.SetShader(skity::Shader::MakeLinear(pts, colors, nullptr, 3,
+                                                skity::TileMode::kClamp, 0));
+      canvas->DrawRect(
+          skity::Rect::MakeXYWH(4.f + m * 15.f, 4.f + row * 22.f, 18.f, 20.f),
+          paint);
+    }
+  }
+}
+
+}  // namespace
+
+// End-to-end staged path: gradient draws under advanced blend modes go
+// through the fetch -> dense row -> variable-src engine handoff on the accel
+// arm and through the scalar brush chain on the legacy arm; the arms must
+// agree within the LUT tolerance and must not be pixel-identical.
+TEST(SWAccel, GradientAdvancedModesAccelMatchesLegacy) {
+  constexpr int32_t kW = 96;
+  constexpr int32_t kH = 72;
+  const uint32_t background = skity::ColorSetA(skity::Color_GRAY, 255);
+
+  skity::sw_accel::SetEnabled(false);
+  skity::Bitmap legacy(kW, kH, skity::AlphaType::kPremul_AlphaType);
+  auto legacy_canvas = skity::Canvas::MakeSoftwareCanvas(&legacy);
+  legacy_canvas->DrawColor(background);
+  DrawGradientAdvancedScene(legacy_canvas.get());
+  skity::sw_accel::SetEnabled(true);
+
+  skity::Bitmap accel(kW, kH, skity::AlphaType::kPremul_AlphaType);
+  auto accel_canvas = skity::Canvas::MakeSoftwareCanvas(&accel);
+  accel_canvas->DrawColor(background);
+  DrawGradientAdvancedScene(accel_canvas.get());
+
+  const uint32_t* lp = reinterpret_cast<const uint32_t*>(legacy.GetPixelAddr());
+  const uint32_t* ap = reinterpret_cast<const uint32_t*>(accel.GetPixelAddr());
+  int64_t differing = 0;
+  int64_t painted = 0;
+  for (size_t i = 0; i < static_cast<size_t>(kW) * kH; i++) {
+    if (lp[i] != background) {
+      painted++;
+    }
+    if (lp[i] == ap[i]) {
+      continue;
+    }
+    differing++;
+    for (int shift = 0; shift < 32; shift += 8) {
+      const int32_t d = static_cast<int32_t>((lp[i] >> shift) & 0xff) -
+                        static_cast<int32_t>((ap[i] >> shift) & 0xff);
+      ASSERT_LE(d < 0 ? -d : d, 4) << "pixel " << i << " shift " << shift;
+    }
+  }
+  EXPECT_GT(painted, static_cast<int64_t>(kW) * kH / 4)
+      << "the scalar gradient fallback did not paint";
+  EXPECT_GT(differing, 0) << "accel and legacy arms are pixel-identical; "
+                             "the staged path was never taken";
 }
 
 // ---------------------------------------------------------------------------

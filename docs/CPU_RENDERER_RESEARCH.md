@@ -146,7 +146,8 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   顺带修,arm NEON 采样统一到标量)→ **M2-2 glyph A8 atlas** ✅
   (软绘切 FreeType mask,复用 AtlasBitmap/PrepareDirectGlyphs)→
   **M2-3 raster clip**(rect fast path + A8 mask 两档,修 min(cover)/PerformMerge)→
-  **M2-4 行直连整合**(行缓冲直供消费端、梯度全 28 模式、删加速态 BrushH)|
+  **M2-4 行直连整合** ✅(行缓冲直供消费端、梯度全 28 模式 staged
+  fetch→blend、删加速态 BrushH)|
   unit + 软件 golden(`--backend=software`,已全绿)+ 分段/逐次绘制基准 |
 | M3 验收 | CPU golden 通道(DisplayList→PNG diff);与 GPU/SwiftShader ±1~2/255 交叉容差 | test-runner 增加 CPU 后端 |
 | M4 扩展 | DisplayList band 并行、AVX-512 评估、mipmap。**mipmap 现状
@@ -574,6 +575,56 @@ span 求交。OnDrawPaint 统一走 DoBrush。
 `TextCanvasAccelMatchesLegacy` 扩展 path-clip 交/差两种文字绘制;
 Debug 1279 通过 + Release 17/17(仅既有 Arena 2 项)。
 
+### M2-4 记录(2026-11-25,行直连整合 + 梯度全 28 模式)
+
+**梯度全 28 模式(staged fetch→blend)**:M2-1 的梯度加速只有 kSrc/kSrcOver
+(融合内核取色+混色一趟)。补齐其余 26 个模式走**分级行直连**架构:
+- kSrc/kSrcOver 融合内核原样保留(单趟、无往返,不回归);
+- 其余模式复用 **kSrc 取色内核做 fetcher**——每 span 先把"稠密颜色行"
+  (premul 内存字、cover 已折)取进 512px 栈分级缓冲(>512px 分块),
+  再交给 **variable-src 混合引擎**一次混一行:kClear memset / kDst no-op
+  在 dispatch 直处理;11 个 coeff 模式 = ScaleKind 表的逐像素 sa 泛化
+  (kInvSrcA/kSrcA 由常量变向量,均匀公式与逐像素 shortcut 的等价性
+  与 M1b 同理成立);10 个可分离 advanced = f32 引擎,sf/saf 从分级行
+  逐像素加载;3 个 HSL 保持标量 PorterDuffBlend 循环;
+- `SupportsGradientMode` = 全模式,brush 侧加速门相应放开(sweep/conical/
+  color filter/unpremul 仍走 legacy);
+- 验证:保险丝 ValidateGradientModes 以**逐像素变化 src**(覆盖 0/255
+  shortcut 边界)驱动每个引擎,coeff 引擎与标量混合**位精确**;单测
+  `GradientStagedModesBlendOwnFetch` 用 kSrc 跑捕获 fetch 词,断言**所有
+  28 个模式**输出 = 对这些词的真实 PorterDuffBlend(coeff/HSL 位精确、
+  advanced ±1、SoftLight ±2),覆盖 >512px 分块与 dispatch 接线;
+  画布级 `GradientAdvancedModesAccelMatchesLegacy` A/B ±4。
+
+**重要发现(记录进方法论)**:f32 advanced 引擎与标量链存在 **±1/通道**
+的最终舍入差——Release(-O2 也含 -O0)标量 `AdvancedBlend` 把
+`a*b + c*d` 契约成 fmadd(反汇编证实,342 条),而 Highway 内核显式
+Mul+Add 不契约。M1b 的固定位精确保险丝只是测试值集**碰巧**没跨舍入
+边界;连续域扫描(随机梯度)必然命中。处理:variable 引擎保险丝对
+kOverlay..kMultiply 放宽 ±1(SoftLight ±2 含 NEON Sqrt 近似),coeff
+引擎保持位精确(整数构造,结构性)。±1 在 M3 交叉容差(±1~2/255)
+之内,GPU WGSL 侧自身也有舍入,不做逐表达式契约形状对齐(M2-1 在
+bilinear 上做过一次,成本收益不成立)。
+
+**行缓冲直供消费端 + 删加速态 BrushH**:
+- `SWSpanBrush` 退役逐 span 虚函数 `BrushH`(M1 加速时代的扩展点):
+  标量回退路径在基类 `Brush()` 内联——span 钳位、cover×global_alpha
+  折叠后,稠密颜色行写进**成员复用行缓冲**(此前每 span 堆分配
+  `vector<uint32_t>`),一次 `BlendPixelH` 调用交给消费端;
+- `SWRenderTarget::BlendPixelH` 增加 premul kRGBA **直连行混合**:
+  逐像素 GetPixel/SetPixel/边界检查只在 unpremul 等直连不可服务的
+  格式保留;premul 行直接按行指针混合(FastBlend 捷径语义不变,
+  PorterDuffBlend 公式不变,输出位一致);
+- 加速态不受影响:kSrcOver 融合、图像、mask 内核不变;solid 早已
+  `FillSolidSpans` 直连。
+
+**性能(arm64 Release,cmake_bench_release)**:400×300 kMultiply 全屏
+梯度 525 vs 1704μs = **-69%(3.25×)**(f32 advanced 数学 + 分级往返,
+比 kSrcOver 融合路径的 -89% 低是预期内的)。行直连让**标量回退臂本身**
+大减:全场景 legacy 臂 8136 → 4733μs(-42%,BlendPixelH 直连行 +
+删每 span 堆分配);加速臂锚点全部维持——全场景 1015μs(M2-3:
+1009)、逐次绘制 ~820 ns/draw(805)、文字 7.21μs(7.29)。
+单测 15/15 SWAccel 全绿;Debug 32/32(渲染四套件)。
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 

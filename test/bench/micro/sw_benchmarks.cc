@@ -468,3 +468,66 @@ static void BM_SWGradientSpanBrush(benchmark::State& state) {
 }
 
 BENCHMARK(BM_SWGradientSpanBrush)->Unit(benchmark::kMicrosecond);
+
+// Full-screen gradient fill under an advanced blend mode: rides the staged
+// path (fetch kernels into dense color rows, then the per-pixel-src
+// engines). The _Legacy arm runs the scalar gradient brush chain in the same
+// binary for the end-to-end comparison.
+#ifdef SKITY_SW_ACCEL
+static void BM_SWDrawGradientMultiply(benchmark::State& state) {
+  skity::Bitmap bitmap(400, 300, skity::AlphaType::kPremul_AlphaType);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+
+  skity::Paint bg;
+  bg.SetColor(skity::ColorSetARGB(255, 200, 180, 160));
+  canvas->DrawPaint(bg);
+
+  skity::Vec4 colors[] = {
+      skity::Vec4{0.9f, 0.1f, 0.2f, 1.f},
+      skity::Vec4{0.1f, 0.8f, 0.3f, 0.7f},
+      skity::Vec4{0.2f, 0.3f, 0.9f, 1.f},
+  };
+  skity::Point pts[] = {
+      skity::Point{0.f, 0.f, 0.f, 1.f},
+      skity::Point{400.f, 300.f, 0.f, 1.f},
+  };
+  skity::Paint paint;
+  paint.SetBlendMode(skity::BlendMode::kMultiply);
+  paint.SetShader(skity::Shader::MakeLinear(pts, colors, nullptr, 3,
+                                            skity::TileMode::kClamp));
+
+  for (auto _ : state) {
+    canvas->DrawRect(skity::Rect::MakeWH(400.f, 300.f), paint);
+  }
+}
+BENCHMARK(BM_SWDrawGradientMultiply)->Unit(benchmark::kMicrosecond);
+
+static void BM_SWDrawGradientMultiplyLegacy(benchmark::State& state) {
+  skity::Bitmap bitmap(400, 300, skity::AlphaType::kPremul_AlphaType);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+
+  skity::Paint bg;
+  bg.SetColor(skity::ColorSetARGB(255, 200, 180, 160));
+  canvas->DrawPaint(bg);
+
+  skity::Vec4 colors[] = {
+      skity::Vec4{0.9f, 0.1f, 0.2f, 1.f},
+      skity::Vec4{0.1f, 0.8f, 0.3f, 0.7f},
+      skity::Vec4{0.2f, 0.3f, 0.9f, 1.f},
+  };
+  skity::Point pts[] = {
+      skity::Point{0.f, 0.f, 0.f, 1.f},
+      skity::Point{400.f, 300.f, 0.f, 1.f},
+  };
+  skity::Paint paint;
+  paint.SetBlendMode(skity::BlendMode::kMultiply);
+  paint.SetShader(skity::Shader::MakeLinear(pts, colors, nullptr, 3,
+                                            skity::TileMode::kClamp));
+
+  AccelToggle toggle(false);
+  for (auto _ : state) {
+    canvas->DrawRect(skity::Rect::MakeWH(400.f, 300.f), paint);
+  }
+}
+BENCHMARK(BM_SWDrawGradientMultiplyLegacy)->Unit(benchmark::kMicrosecond);
+#endif
