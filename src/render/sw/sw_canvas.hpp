@@ -6,9 +6,11 @@
 #define SRC_RENDER_SW_SW_CANVAS_HPP
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <memory>
 #include <skity/render/canvas.hpp>
 
 #include "src/render/canvas_state.hpp"
+#include "src/render/sw/sw_raster_clip.hpp"
 #include "src/render/sw/sw_subpixel.hpp"
 
 #ifndef SKITY_CPU
@@ -24,25 +26,18 @@ class SWRaster;
 
 class SWCanvas : public Canvas {
   struct State {
-    std::vector<Span> clip_spans_ = {};
-    ClipOp op = ClipOp::kIntersect;
+    // The resolved raster clip of this save state (run-encoded antialiased
+    // coverage + device bounds); null means no clip. save() shares the
+    // parent's clip, a clip op builds a new one, restore() drops it.
+    std::shared_ptr<const RasterClip> clip;
 
     bool has_layer = false;
 
-    State() : clip_spans_() {}
+    State() = default;
     State(State const&) = default;
     State& operator=(State const&) = default;
 
-    bool HasClip() const { return !clip_spans_.empty(); }
-
-    std::vector<Span> PerformClip(std::vector<Span> const& spans);
-
-    std::vector<Span> RecursiveClip(std::vector<Span> const& spans, ClipOp op);
-
-   private:
-    std::vector<Span> FindSpan(Span const& span);
-
-    std::vector<Span> PerformMerge(std::vector<Span> const& spans);
+    bool HasClip() const { return clip != nullptr; }
   };
 
   struct LayerState {
@@ -73,6 +68,13 @@ class SWCanvas : public Canvas {
   void OnClipRect(const Rect& rect, ClipOp op) override;
 
   void OnClipPath(const Path& path, ClipOp op) override;
+
+  // Combines the pending clip with the current state's resolved clip per the
+  // op and stores it (see sw_raster_clip.hpp).
+  void PushClip(RasterClip clip, ClipOp op);
+
+  // Rasterizes the device-space path into a run-encoded clip and pushes it.
+  void ApplyClipPath(const Path& path, ClipOp op);
 
   void OnDrawPath(const Path& path, const Paint& paint) override;
 
@@ -157,6 +159,10 @@ class SWCanvas : public Canvas {
   Rect GetScanClipBounds() const {
     Rect clip_bounds = GetGlobalClipBounds();
     clip_bounds.Offset(-global_offset_.x, -global_offset_.y);
+    if (const auto& clip = state_stack_.back().clip) {
+      // The resolved clip bounds bound every scan and blit window.
+      clip_bounds.Intersect(clip->bounds);
+    }
     return clip_bounds;
   }
 

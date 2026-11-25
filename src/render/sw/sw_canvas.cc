@@ -75,88 +75,6 @@ static bool TryAccelerateSolidFill(std::vector<Span> const& spans,
 }
 #endif
 
-static std::vector<Span> find_span_y(std::vector<Span> const& spans,
-                                     int32_t y) {
-  std::vector<Span> ret;
-
-  for (Span const& span : spans) {
-    if (span.y == y) {
-      ret.emplace_back(span);
-    }
-  }
-
-  return ret;
-}
-
-static std::vector<Span> spans_subtraction(std::vector<Span> const& subtrahend,
-                                           std::vector<Span> const& minuend) {
-  std::vector<Span> ret;
-
-  for (Span const& span : subtrahend) {
-    auto ms = find_span_y(minuend, span.y);
-
-    // no spans in this line means minus zero
-    if (ms.empty()) {
-      ret.emplace_back(span);
-      continue;
-    }
-
-    std::sort(ms.begin(), ms.end(),
-              [](Span const& a, Span const& b) { return a.x < b.x; });
-
-    int32_t curr_x = span.x;
-    int32_t curr_len = span.len;
-
-    for (Span const& m : ms) {
-      if (m.x + m.len < curr_x || m.x > curr_x + curr_len) {
-        continue;
-      }
-
-      if (m.x < curr_x) {
-        if (m.x + m.len > curr_x + curr_len) {
-          // complete subtracted
-          curr_len = 0;
-          break;
-        }
-
-        int32_t last = curr_x + curr_len;
-        curr_x = m.x + m.len;
-        curr_len = last - curr_x;
-
-      } else {  // m.x > curr_x && m.x < curr_x + curr_len
-        if (m.x + m.len < curr_x + curr_len) {
-          int32_t last = curr_x + curr_len;
-          int32_t x = curr_x;
-          int32_t len = m.x - curr_x;
-
-          ret.emplace_back(Span{x, span.y, len, span.cover});
-
-          curr_x = m.x + m.len;
-          curr_len = last - curr_x;
-        } else {
-          int32_t x = curr_x;
-
-          int32_t len = m.x - curr_x;
-
-          ret.emplace_back(Span{x, span.y, len, span.cover});
-
-          curr_len = 0;
-        }
-      }
-
-      if (curr_len <= 0) {
-        break;
-      }
-    }
-
-    if (curr_len > 0) {
-      ret.emplace_back(Span{curr_x, span.y, curr_len, span.cover});
-    }
-  }
-
-  return ret;
-}
-
 static Rect ComputeBoundsIfStroke(Rect bounds, const Paint& paint) {
   if (paint.GetStyle() != Paint::kFill_Style) {
     float stroke_width = paint.GetStrokeWidth();
@@ -178,115 +96,6 @@ std::unique_ptr<Canvas> Canvas::MakeSoftwareCanvas(Bitmap* bitmap) {
   }
 
   return std::make_unique<SWCanvas>(bitmap);
-}
-
-std::vector<Span> SWCanvas::State::PerformClip(const std::vector<Span>& spans) {
-  if (this->op == Canvas::ClipOp::kDifference) {
-    return spans_subtraction(spans, clip_spans_);
-  }
-
-  std::vector<Span> ret;
-
-  for (Span const& span : spans) {
-    auto sub_spans = FindSpan(span);
-
-    if (sub_spans.empty()) {
-      continue;
-    }
-
-    ret.insert(ret.end(), sub_spans.begin(), sub_spans.end());
-  }
-
-  return ret;
-}
-
-std::vector<Span> SWCanvas::State::RecursiveClip(std::vector<Span> const& spans,
-                                                 ClipOp clip_op) {
-  if (this->op == clip_op) {
-    if (clip_op == Canvas::ClipOp::kIntersect) {
-      return PerformClip(spans);
-    } else {
-      return PerformMerge(spans);
-    }
-  } else {
-    if (this->op == Canvas::ClipOp::kDifference) {
-      return spans_subtraction(spans, clip_spans_);
-    } else {
-      return spans_subtraction(clip_spans_, spans);
-    }
-  }
-}
-
-std::vector<Span> SWCanvas::State::PerformMerge(
-    std::vector<Span> const& spans) {
-  // TODO(tangruiwen) this function is not correct need refact
-  std::vector<Span> ret;
-  ret.insert(ret.end(), spans.begin(), spans.end());
-  ret.insert(ret.end(), clip_spans_.begin(), clip_spans_.end());
-
-  std::sort(ret.begin(), ret.end(), [](Span const& a, Span const& b) {
-    if (a.y < b.y) {
-      return true;
-    } else if (a.y == b.y) {
-      if (a.x != b.x) {
-        return a.x < b.x;
-      } else {
-        return a.cover > b.cover;
-      }
-    } else {
-      return false;
-    }
-  });
-
-  return ret;
-}
-
-std::vector<Span> SWCanvas::State::FindSpan(Span const& span) {
-  std::vector<Span> ret;
-
-  for (Span clip : clip_spans_) {
-    if (clip.y != span.y) {
-      continue;
-    }
-
-    if (clip.x < span.x) {
-      if (clip.x + clip.len < span.x) {
-        continue;
-      }
-
-      int32_t last = std::min(clip.x + clip.len, span.x + span.len);
-
-      Span sub_span{};
-      sub_span.x = span.x;
-      sub_span.y = span.y;
-      sub_span.len = last - span.x;
-      sub_span.cover = std::min(clip.cover, span.cover);
-
-      ret.emplace_back(sub_span);
-    } else if (clip.x == span.x) {
-      Span sub_span{};
-      sub_span.x = span.x;
-      sub_span.y = span.y;
-      sub_span.len = std::min(span.len, clip.len);
-      sub_span.cover = std::min(clip.cover, span.cover);
-
-      ret.emplace_back(sub_span);
-    } else if (clip.x > span.x) {
-      if (span.x + span.len < clip.x) {
-        continue;
-      }
-
-      Span sub_span{};
-      sub_span.x = clip.x;
-      sub_span.y = span.y;
-      sub_span.len = std::min(span.x + span.len - clip.x + 1, clip.len);
-      sub_span.cover = std::min(clip.cover, span.cover);
-
-      ret.emplace_back(sub_span);
-    }
-  }
-
-  return ret;
 }
 
 void SWCanvas::LayerState::Init(SWCanvas* parent_canvas, Vec2 offset) {
@@ -319,6 +128,26 @@ void SWCanvas::OnDrawLine(float x0, float y0, float x1, float y1,
   this->OnDrawPath(path, paint);
 }
 
+void SWCanvas::PushClip(RasterClip clip, ClipOp op) {
+  const auto& current = state_stack_.back().clip;
+  if (!current) {
+    // The first clip op of the state. A leading kDifference subtracts from
+    // the whole surface (the implicit base of the clip stack).
+    if (op == ClipOp::kDifference) {
+      clip =
+          DifferenceClip(clip, MakeBoundsClip(Rect::MakeWH(Width(), Height())));
+    }
+    state_stack_.back().clip =
+        std::make_shared<const RasterClip>(std::move(clip));
+    return;
+  }
+  RasterClip resolved = op == ClipOp::kIntersect
+                            ? IntersectClip(*current, clip)
+                            : DifferenceClip(*current, clip);
+  state_stack_.back().clip =
+      std::make_shared<const RasterClip>(std::move(resolved));
+}
+
 void SWCanvas::OnClipRect(const Rect& rect, ClipOp op) {
   SKITY_TRACE_EVENT(SWCanvas_OnClipRect);
 
@@ -327,14 +156,34 @@ void SWCanvas::OnClipRect(const Rect& rect, ClipOp op) {
     return;
   }
 
-  if (op == ClipOp::kDifference ||
-      !CurrentTransform().OnlyScaleAndTranslate()) {
-    Canvas::OnClipRect(rect, op);
+  const Matrix ctm = CurrentTransform();
+  Rect device_rect;
+  ctm.MapRect(&device_rect, rect);
+
+  if (op == ClipOp::kIntersect && ctm.OnlyScaleAndTranslate() &&
+      device_rect.Left() == std::floor(device_rect.Left()) &&
+      device_rect.Top() == std::floor(device_rect.Top()) &&
+      device_rect.Right() == std::ceil(device_rect.Right()) &&
+      device_rect.Bottom() == std::ceil(device_rect.Bottom())) {
+    // Tier 0: an integer-aligned rect intersection is pure bounds; the
+    // global clip bounds (updated by Canvas::ClipRect) already carry it.
+    PushClip(MakeBoundsClip(device_rect), op);
     return;
   }
 
-  // We do nothing here because this clip is already handled in calculating
-  // global clip bounds
+  // Tier 1: rasterize the mapped rect - antialiased edges for fractional
+  // rects, exact subtractive coverage for kDifference, and correct coverage
+  // under non-scale-and-translate transforms.
+  Path path;
+  path.AddRect(rect);
+  ApplyClipPath(path, op);
+}
+
+void SWCanvas::ApplyClipPath(const Path& path, ClipOp op) {
+  SWRaster raster;
+  raster.RastePath(path, CurrentTransform(), GetScanClipBounds());
+
+  PushClip(MakeRunsClip(raster.GetBounds(), raster.CurrentSpans()), op);
 }
 
 void SWCanvas::OnClipPath(const Path& path, ClipOp op) {
@@ -345,33 +194,23 @@ void SWCanvas::OnClipPath(const Path& path, ClipOp op) {
     return;
   }
 
-  SWRaster raster;
-  raster.RastePath(path, CurrentTransform(), GetScanClipBounds());
-
-  if (state_stack_.back().HasClip()) {
-    auto spans = state_stack_.back().RecursiveClip(raster.CurrentSpans(), op);
-    state_stack_.back().clip_spans_ = spans;
-    if (state_stack_.back().op != op) {
-      state_stack_.back().op = Canvas::ClipOp::kIntersect;
-    }
-  } else {
-    state_stack_.back().clip_spans_ = raster.CurrentSpans();
-    state_stack_.back().op = op;
-  }
+  ApplyClipPath(path, op);
 }
 
 void SWCanvas::DoBrush(const SWRaster& raster, const Paint& paint,
                        bool stroke) {
   SKITY_TRACE_EVENT(SWCanvas_DoBrush);
 
-  std::vector<Span> clip_spans;
+  std::vector<Span> clipped;
   std::vector<Span> const* spans = nullptr;
-  if (state_stack_.back().HasClip()) {
-    clip_spans = state_stack_.back().PerformClip(raster.CurrentSpans());
-    if (clip_spans.empty()) {
+  if (const auto& clip = state_stack_.back().clip) {
+    // The resolved clip composes its antialiased coverage into the fill
+    // spans (multiplying at clip edges); the brush sees final coverages.
+    clipped = ClipSpans(*clip, raster.CurrentSpans());
+    if (clipped.empty()) {
       return;
     }
-    spans = &clip_spans;
+    spans = &clipped;
   } else {
     spans = &raster.CurrentSpans();
   }
@@ -450,34 +289,13 @@ void SWCanvas::OnDrawPaint(const Paint& paint) {
     return;
   }
 
-  skity::Rect bounds = skity::Rect::MakeWH(Width(), Height());
-
   Path path;
-  path.AddRect(bounds);
+  path.AddRect(Rect::MakeWH(Width(), Height()));
 
   SWRaster raster;
-  raster.RastePath(path, Matrix{});
+  raster.RastePath(path, Matrix{}, GetScanClipBounds());
 
-  std::unique_ptr<SWSpanBrush> brush;
-  // no clip
-  if (state_stack_.empty() || !state_stack_.back().HasClip()) {
-#ifdef SKITY_SW_ACCEL
-    if (TryAccelerateSolidFill(raster.CurrentSpans(), paint, false, bitmap_)) {
-      return;
-    }
-#endif
-    brush = GenerateBrush(raster.CurrentSpans(), paint, false, bounds);
-    brush->Brush();
-  } else {
-    auto spans = state_stack_.back().PerformClip(raster.CurrentSpans());
-#ifdef SKITY_SW_ACCEL
-    if (TryAccelerateSolidFill(spans, paint, false, bitmap_)) {
-      return;
-    }
-#endif
-    brush = GenerateBrush(spans, paint, false, bounds);
-    brush->Brush();
-  }
+  DoBrush(raster, paint, false);
 }
 
 void SWCanvas::OnSaveLayer(const Rect& bounds, const Paint& paint) {
@@ -656,14 +474,13 @@ void SWCanvas::FillGlyphs(uint32_t count, const GlyphID* glyphs,
   }
 
   // Run-level eligibility for the A8 glyph mask path: solid-color fills of
-  // outline fonts on premul RGBA targets with no active path clip (rect
-  // clips are honored through the global clip bounds). Shader, color filter
-  // and stroke text keep the path pipeline.
+  // outline fonts on premul RGBA targets. Shader, color filter and stroke
+  // text keep the path pipeline. Clips of every tier are supported: bounds
+  // through the blit window, run-encoded clips through per-row staging.
   const bool mask_eligible =
       paint.GetShader() == nullptr && paint.GetColorFilter() == nullptr &&
       bitmap_->GetAlphaType() == AlphaType::kPremul_AlphaType &&
-      bitmap_->GetColorType() == ColorType::kRGBA &&
-      !state_stack_.back().HasClip();
+      bitmap_->GetColorType() == ColorType::kRGBA;
 
   const Matrix ctm = CurrentTransform();
   const Matrix22 transform22{ctm.GetScaleX(), ctm.GetSkewX(), ctm.GetSkewY(),
@@ -724,21 +541,54 @@ void SWCanvas::FillGlyphs(uint32_t count, const GlyphID* glyphs,
           const uint8_t* mask_ptr =
               mask.mask + static_cast<size_t>(y0 - glyph_top) * mask.stride +
               static_cast<size_t>(x0 - glyph_left);
+          const auto& clip = state_stack_.back().clip;
+          if (clip && clip->HasRuns()) {
+            // The clip coverage varies per pixel: compose it into the glyph
+            // mask row by row (one staged clip row at a time) and blend the
+            // combined coverage.
+            std::vector<uint8_t> combined(static_cast<size_t>(x1 - x0));
+            for (int32_t row = y0; row < y1; row++) {
+              StageClipRow(*clip, row, x0, x1, combined.data());
+              const uint8_t* glyph_row =
+                  mask_ptr + static_cast<size_t>(row - y0) * mask.stride;
+              for (int32_t i = 0; i < x1 - x0; i++) {
+                combined[i] = static_cast<uint8_t>(
+                    MulDiv255Round(glyph_row[i], combined[i]));
+              }
 #ifdef SKITY_SW_ACCEL
-          bool blended = false;
-          if (sw_accel::IsEnabled()) {
-            blended = sw_accel::BlendMaskRect(
-                paint.GetBlendMode(), color_pm, global_alpha,
-                bitmap_->GetPixelAddr(), bitmap_->RowBytes(), surface_w,
-                surface_h, x0, y0, mask_ptr, mask.stride, x1 - x0, y1 - y0);
-          }
-          if (!blended)
+              bool blended = false;
+              if (sw_accel::IsEnabled()) {
+                blended = sw_accel::BlendMaskRect(
+                    paint.GetBlendMode(), color_pm, global_alpha,
+                    bitmap_->GetPixelAddr(), bitmap_->RowBytes(), surface_w,
+                    surface_h, x0, row, combined.data(), x1 - x0, x1 - x0, 1);
+              }
+              if (!blended)
 #endif
-          {
-            BlendGlyphMaskRect(mask_ptr, mask.stride, x0, y0, x1 - x0, y1 - y0,
-                               bitmap_->GetPixelAddr(), bitmap_->RowBytes(),
-                               surface_w, surface_h, color_pm, global_alpha,
-                               paint.GetBlendMode());
+              {
+                BlendGlyphMaskRect(
+                    combined.data(), x1 - x0, x0, row, x1 - x0, 1,
+                    bitmap_->GetPixelAddr(), bitmap_->RowBytes(), surface_w,
+                    surface_h, color_pm, global_alpha, paint.GetBlendMode());
+              }
+            }
+          } else {
+#ifdef SKITY_SW_ACCEL
+            bool blended = false;
+            if (sw_accel::IsEnabled()) {
+              blended = sw_accel::BlendMaskRect(
+                  paint.GetBlendMode(), color_pm, global_alpha,
+                  bitmap_->GetPixelAddr(), bitmap_->RowBytes(), surface_w,
+                  surface_h, x0, y0, mask_ptr, mask.stride, x1 - x0, y1 - y0);
+            }
+            if (!blended)
+#endif
+            {
+              BlendGlyphMaskRect(mask_ptr, mask.stride, x0, y0, x1 - x0,
+                                 y1 - y0, bitmap_->GetPixelAddr(),
+                                 bitmap_->RowBytes(), surface_w, surface_h,
+                                 color_pm, global_alpha, paint.GetBlendMode());
+            }
           }
         }
         continue;
