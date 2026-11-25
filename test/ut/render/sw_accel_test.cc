@@ -1014,6 +1014,24 @@ void DrawTextScene(skity::Canvas* canvas) {
   paint.SetAlphaF(0.5f);
   canvas->DrawTextBlob(blob.get(), 4.f, 56.f, paint);
   paint.SetAlphaF(1.f);
+
+  // Under a run-encoded path clip: the glyph coverage composes with the
+  // staged clip row per pixel on both arms.
+  skity::Path clip_path;
+  clip_path.MoveTo(0.f, 72.f);
+  clip_path.QuadTo(64.f, 40.f, 128.f, 72.f);
+  clip_path.Close();
+  canvas->Save();
+  canvas->ClipPath(clip_path, skity::Canvas::ClipOp::kIntersect);
+  canvas->DrawTextBlob(blob.get(), 4.f, 70.f, paint);
+  canvas->Restore();
+
+  skity::Path hole;
+  hole.AddRect(skity::Rect::MakeXYWH(60.f, 0.f, 24.f, 72.f));
+  canvas->Save();
+  canvas->ClipPath(hole, skity::Canvas::ClipOp::kDifference);
+  canvas->DrawTextBlob(blob.get(), 4.f, 100.f, paint);
+  canvas->Restore();
 }
 
 // Canvas-level A/B: the same text scene with the SIMD mask blend on and off

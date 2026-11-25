@@ -621,6 +621,8 @@ if(${SKITY_SW_RENDERER})
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_glyph_atlas.hpp
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_raster.cc
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_raster.hpp
+    ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_raster_clip.cc
+    ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_raster_clip.hpp
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_render_target.cc
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_render_target.hpp
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_span_brush.cc
