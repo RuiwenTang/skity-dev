@@ -720,6 +720,16 @@ shape 二进制全部 310 case 在 software 后端跑通,归因分类后按类�
    渐变两个疑似色彩空间插值路径差距(与第 0 层 ColorSpace 断言失败
    同族),blur 系列大概率登记实现差异 + `_sw`。
 
+**第 0 层首查线索(DropShadow,2026-11-26)**:
+`DeclaredShadowMatchesImageOnSRGBTarget` 的 R=255 vs 128 定位到
+`DropShadowImageFilter::OnFilter`(`image_filter.cc:273`)——注释自认
+"software path 仍把 declared bytes 当 sRGB,color-space aware CPU filter
+path 随软绘重构落地"。且断言的 expected 128 恰为 P3 空间内 premul 值,
+说明**参考的 image decode 路径在软件上同样丢了 P3→sRGB 转换**——两条
+路径丢法不同(shadow 丢 alpha/premul、decode 丢目标空间转换),修复须
+两条一起对齐 GPU 语义(declared space → unpremul 转目标空间 → premul),
+预期与第 3 层渐变两 case、Blur 系列的色彩半差同根。
+
 **方法论(本轮教训)**:stdout 的 `GOLDEN_TEST_FAILED_METRICS` 解析必须
 按"**最后一个** `test name:` 行"归属——正则 `test name:.*?METRICS` 的
 非贪婪跨测试串位曾误报 8 个"全量失败/单独通过"的假阳性,引出一次
