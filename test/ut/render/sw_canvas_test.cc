@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <skity/effect/image_filter.hpp>
 #include <skity/graphic/bitmap.hpp>
 #include <skity/graphic/color.hpp>
 #include <skity/graphic/paint.hpp>
@@ -219,6 +220,78 @@ TEST(SWCanvas, ScreenKeepsOpaqueDestinationAcrossSpan) {
   for (uint32_t x = 0; x < bitmap.Width(); ++x) {
     EXPECT_EQ(bitmap.GetPixel(x, 0), skity::ColorSetARGB(255, 243, 64, 128));
   }
+}
+
+namespace {
+
+// Draws a 100x100 rect translated by (50, 50) through a projective matrix
+// whose w row is constant (z=0 points divide by 2000, so the net mapping is
+// the affine translate (50.4, 50.6)); with a blur filter when requested.
+void DrawRectUnderPerspective(skity::Canvas* canvas, float blur_x,
+                              float blur_y) {
+  skity::Paint paint;
+  paint.SetAntiAlias(true);
+  paint.SetStyle(skity::Paint::kFill_Style);
+  paint.SetColor(skity::Color_RED);
+  if (blur_x > 0.f || blur_y > 0.f) {
+    paint.SetImageFilter(skity::ImageFilters::Blur(blur_x, blur_y));
+  }
+
+  canvas->Save();
+  canvas->Translate(50.f, 50.f);
+  canvas->Concat(skity::Matrix{
+      2000,
+      0,
+      0,
+      0,  //
+      0,
+      2000,
+      0,
+      0,  //
+      800,
+      1200,
+      1,
+      1,
+      0,
+      0,
+      2000,
+      2000,
+  });
+  canvas->DrawRect(skity::Rect::MakeWH(100.f, 100.f), paint);
+  canvas->Restore();
+}
+
+}  // namespace
+
+// Regression test: CopyWithMatrix used to keep glm's homogeneous result,
+// so a projective CTM left w-scaled path coordinates (x2000 here). The
+// rasterizer then overflowed its 16.16 scan range (SWIntToFixed wrapped
+// start_y 84000 back to 18464) and the AEL invariant tripped; without a
+// filter the content silently vanished instead (bounds clipped away).
+TEST(SWCanvas, PerspectiveTransformMapsPathToDevice) {
+  skity::Bitmap bitmap(200, 200, skity::AlphaType::kPremul_AlphaType);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+  ASSERT_TRUE(canvas);
+  DrawRectUnderPerspective(canvas.get(), 0.f, 0.f);
+
+  // Net affine translate (50.4, 50.6): the rect covers ~(50..150)^2.
+  EXPECT_EQ(skity::Color_RED, bitmap.GetPixel(100, 100));
+  EXPECT_EQ(skity::Color_RED, bitmap.GetPixel(52, 149));
+  EXPECT_EQ(0u, bitmap.GetPixel(10, 10));
+  EXPECT_EQ(0u, bitmap.GetPixel(190, 190));
+}
+
+TEST(SWCanvas, PerspectiveImageFilterCompositeDoesNotOverflowScanRange) {
+  skity::Bitmap bitmap(200, 200, skity::AlphaType::kPremul_AlphaType);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+  ASSERT_TRUE(canvas);
+  DrawRectUnderPerspective(canvas.get(), 10.f, 5.f);
+
+  // The blurred composite still lands at the translated position.
+  EXPECT_EQ(skity::Color_RED, bitmap.GetPixel(100, 100));
+  EXPECT_EQ(0u, bitmap.GetPixel(10, 10));
+  // The blur halo bleeds outside the rect with partial coverage.
+  EXPECT_NE(0u, bitmap.GetPixel(48, 100));
 }
 
 TEST(SWCanvas, LeadingDifferenceClipSubtractsFromWholeSurface) {

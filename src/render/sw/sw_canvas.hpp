@@ -7,6 +7,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <memory>
+#include <skity/graphic/bitmap.hpp>
 #include <skity/render/canvas.hpp>
 #include <skity/render/sw_context.hpp>
 
@@ -160,6 +161,11 @@ class SWCanvas : public Canvas {
   Rect GetScanClipBounds() const {
     Rect clip_bounds = GetGlobalClipBounds();
     clip_bounds.Offset(-global_offset_.x, -global_offset_.y);
+    // Keep the scan window inside the device even with no clip: unclipped
+    // paths (or coordinates inflated before the perspective fold) would
+    // otherwise overflow the rasterizer's 16.16 fixed-point scan range.
+    clip_bounds.Intersect(Rect::MakeWH(static_cast<float>(bitmap_->Width()),
+                                       static_cast<float>(bitmap_->Height())));
     if (const auto& clip = state_stack_.back().clip) {
       // The resolved clip bounds bound every scan and blit window.
       clip_bounds.Intersect(clip->bounds);
@@ -184,8 +190,39 @@ class SWCanvas : public Canvas {
   }
 
   Matrix CurrentTransform() {
-    return Matrix::Translate(-global_offset_.x, -global_offset_.y) *
-           GetTotalMatrix();
+    Matrix transform = Matrix::Translate(-global_offset_.x, -global_offset_.y) *
+                       GetTotalMatrix();
+    // A projective CTM whose w row is constant (independent of x/y) has an
+    // exact affine equivalent on the z=0 drawing plane: fold it in here so
+    // every consumer - the rasterizer's path transform, the brush texture
+    // and gradient inverse mappings - sees plain affine coordinates
+    // instead of glm's homogeneous (w-scaled) results. Truly projective
+    // CTMs (w depends on x/y) are left untouched; the software pipeline
+    // has no per-pixel divide for those yet.
+    const float w_x = transform[0][3];
+    const float w_y = transform[1][3];
+    const float w_w = transform[3][3];
+    if (w_x == 0.f && w_y == 0.f && w_w != 0.f && w_w != 1.f) {
+      const float inv_w = 1.f / w_w;
+      for (int col = 0; col < 4; col++) {
+        transform[col][0] *= inv_w;
+        transform[col][1] *= inv_w;
+      }
+      // The z row/column carries no 2D information (points live on z=0 and
+      // nothing consumes the z output), but a non-standard z row would skew
+      // glm's full inverse into the 2x3 consumers (MapPoint): normalize it.
+      transform[2][0] = 0.f;
+      transform[2][1] = 0.f;
+      transform[2][2] = 1.f;
+      transform[2][3] = 0.f;
+      transform[0][2] = 0.f;
+      transform[1][2] = 0.f;
+      transform[3][2] = 0.f;
+      transform[0][3] = 0.f;
+      transform[1][3] = 0.f;
+      transform[3][3] = 1.f;
+    }
+    return transform;
   }
 
  private:

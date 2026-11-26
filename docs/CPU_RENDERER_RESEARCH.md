@@ -1044,6 +1044,42 @@ band 过滤/调度/interleave),立即模式每 draw 即执行、无全局视野,
   违反扫描区间假设;疑似 c2d525a6 各向异性 blur/设备对齐 layer 引入,
   M3 记录的 115/115 全绿不含此崩溃)。待单独归因修复。
 
+**透视崩溃归因与修复(2026-11-26,同日完成)**:三层缺陷叠加,全部实测
+定位(探针直拍 RastePath 参数 / AEL 边数据 / brush 矩阵):
+1. **`CopyWithMatrix` 保留齐次坐标**(glm `matrix * point` 不做透视除法,
+   这是**有测试锁定的 legacy 契约**——`Path2D.QueriesCopyXYWithout
+   ChangingLegacyGeometryOrDividingByW`,不能改):透视 CTM 下 path 坐标
+   滞留 w 倍(本例 ×2000,scan bounds 68000..316000px);
+2. **无 clip 时全局 clip bounds = kMaxCullRect**(±1e9),scan 范围不受
+   设备约束;
+3. **SWFixed 16.16 上限 32767px**:`SWIntToFixed(84000)` 溢出回绕成
+   18464,WalkEdges 用回绕后的 y 做初始 `GoY` 外推,把 y 范围仅
+   2080..4739 的边推出其 `lower_y` → 断言崩。
+   **M3 时代此 case 不崩但内容全丢**(溢出回绕后恰好裁空,旧 `_sw`
+   基线目检为全黑空图)——「115/115 绿」是空图对空图,不是正确性。
+修复(commit 见 git log):
+- **`SWCanvas::CurrentTransform()` 常数 w 折叠**:w 行不依赖 x/y 的透视
+  CTM 在 z=0 绘制平面上有精确仿射等价,出口处折叠(除 w + **z 行/列
+  标准化**——z 行残留会让 glm 通用逆的 translate 混入 z 列贡献,实测
+  +800 = -50 + 0.425×2000,而 MapPoint 只取 2x3 分量)。下游(path
+  光栅化、brush 纹理/渐变逆矩阵)全部自动正确。真透视(w 依赖 x/y)
+  仍不支持,登记为既有缺口;
+- **`GetScanClipBounds()` 与本 canvas 设备尺寸求交**(注意在
+  `global_offset_` 应用**之后**——先裁后 offset 会把 layer canvas 的
+  全局坐标错误裁进 local 尺寸,SaveLayer 系 4 case 因此全挂过一版),
+  作为定点溢出的最后防线;
+- 回归测试 2 项(`SWCanvas.PerspectiveTransformMapsPathToDevice` /
+  `PerspectiveImageFilterCompositeDoesNotOverflowScanRange`):常数 w
+  透视下内容精确落位 + blur 回画不溢出;
+- **`blur_filter_10_5_perspective_sw.png` 重录**(旧基线 = 空图;新输出
+  与 GPU 共享基线目检同构,halo 差为既有 blur 实现差族)。
+验证:unit 1292/1292;software golden-shape **全量 310 = 167 过 / 0 败**
+(M3 终态恢复,修复前 166+1 崩)、allowlist 115/115、golden-text 2/2。
+**教训**:(a) CopyWithMatrix 的「不除 w」是被测试锁定的公共契约,改
+公共函数前先 grep 测试;(b) 定点坐标系(16.16)下 >32767px 的坐标是
+静默回绕,必须在进入光栅化前钳制;(c) 全黑基线的 golden 绿不构成
+正确性证据,重录/新增 case 时基线内容必须目检。
+
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
 > **校准状态(2026-11)**:以下为开工前的机制推算,现在有实测锚点了。
