@@ -141,6 +141,13 @@ void SWCanvas::LayerState::Init(SWCanvas* parent_canvas, Vec2 offset) {
   this->canvas = parent_canvas->CreateSubCanvas(
       bitmap.get(), offset + Vec2{rel_bounds.Left(), rel_bounds.Top()});
 
+  // The layer canvas renders through the full CTM, so layer pixels are
+  // device-aligned like the GPU's layer texture: regular content lands at
+  // the same device position it would without a layer, and SetMatrix
+  // inside the layer addresses device coordinates. The composite blits
+  // the layer back 1:1 without re-applying the CTM.
+  this->canvas->Concat(parent_canvas->CurrentTransform());
+
   if (bitmap->GetPixelAddr() != nullptr) {
     std::memset(bitmap->GetPixelAddr(), 0,
                 bitmap->RowBytes() * bitmap->Height());
@@ -373,6 +380,12 @@ void SWCanvas::OnSaveLayer(const Rect& bounds, const Paint& paint) {
 
   auto layer =
       GenerateLayer(rel_bounds, layer_bounds, target_canvas->global_offset_);
+
+  if (layer == nullptr) {
+    // Failed allocation: no layer to restore, keep drawing on the target.
+    CurrentState()->has_layer = false;
+    return;
+  }
 
   layer->paint = paint;
 }
@@ -987,6 +1000,15 @@ SWCanvas::LayerState* SWCanvas::GenerateLayer(Rect const& rel_bounds,
 
   layer_stack_.back()->Init(this, offset);
 
+  if (layer_stack_.back()->bitmap->GetPixelAddr() == nullptr) {
+    // The layer bitmap allocation failed (degenerate huge bounds): drop
+    // the layer and let the content draw straight onto the current
+    // target - the GPU's failed-layer path, which also keeps SetMatrix
+    // device-absolute.
+    layer_stack_.pop_back();
+    return nullptr;
+  }
+
   return layer_stack_.back().get();
 }
 
@@ -997,9 +1019,19 @@ void SWCanvas::OnLayerRestore() {
     PeekLayerStack()->canvas->OnRestore();
   }
 
-  SetDrawingLayer(layer->paint.GetMaskFilter() == nullptr);
-  this->DrawImage(Image::MakeImage(layer->bitmap->GetPixmap()),
-                  layer->log_bounds, &layer->paint);
+  // The layer bitmap is device-aligned; blit it back 1:1 (the content
+  // already carries the CTM it was recorded with). SetMatrix instead of
+  // Save/Restore - a saved state carries has_layer and its restore would
+  // recurse into OnLayerRestore - and draw outside the drawing-layer flag:
+  // its shader fast path drops the destination translate, which only
+  // matched the old layer-local composite rect.
+  {
+    Matrix ctm = CurrentTransform();
+    SetMatrix(Matrix{});
+    this->DrawImage(Image::MakeImage(layer->bitmap->GetPixmap()),
+                    layer->rel_bounds, &layer->paint);
+    SetMatrix(ctm);
+  }
   SetDrawingLayer(false);
 }
 

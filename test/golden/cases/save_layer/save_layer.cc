@@ -325,13 +325,6 @@ TEST(SaveLayerGolden, ResetMatrixDrawColorFillsLayer) {
 TEST(SaveLayerGolden, FailedSaveLayerPreservesMatrix) {
   auto* env = skity::testing::GoldenTestEnv::GetInstance();
   ASSERT_NE(env, nullptr);
-  if (env->GetBackend() == skity::testing::Backend::kSoftware) {
-    // SetMatrix inside a layer is device-absolute on GPU backends (the
-    // layer folds away for an identity filter matrix); the software layer
-    // keeps a layer-local matrix. Deferred to the layer-matrix semantics
-    // alignment, not the nested-filter execution itself.
-    GTEST_SKIP() << "Layer SetMatrix device semantics differ on software";
-  }
   auto texture = env->RenderToTexture(80, 40, [](skity::Canvas* canvas) {
     canvas->Clear(skity::Color_GREEN);
     canvas->Translate(20.f, 0.f);

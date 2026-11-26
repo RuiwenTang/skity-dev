@@ -64,6 +64,7 @@ constexpr char kSoftwareGoldenFilter[] =
     "SimpleShapeGolden.DrawStrokeRRectWithRotate:"
     "SimpleShapeGolden.DrawYinAndYang:"
     "SKP_Golden.Tiger:"
+    "SaveLayerGolden.FailedSaveLayerPreservesMatrix:"
     "SaveLayerGolden.TwoCircle:SaveLayerGolden.ThreeCircle:"
     "SaveLayerGolden.PerspectiveZ0Plane:"
     "ColorFilterGolden.SRGBToLinearGamma_Translucent:"

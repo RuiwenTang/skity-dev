@@ -13,18 +13,34 @@
 namespace skity {
 
 SWStackBlur::SWStackBlur(Bitmap* src, Bitmap* dst, int32_t blur_radius)
-    : src_(src), dst_(dst), blur_radius_(std::min(blur_radius, 254)) {}
+    : SWStackBlur(src, dst, blur_radius, blur_radius) {}
+
+SWStackBlur::SWStackBlur(Bitmap* src, Bitmap* dst, int32_t blur_radius_x,
+                         int32_t blur_radius_y)
+    : src_(src),
+      dst_(dst),
+      blur_radius_x_(std::min(blur_radius_x, 254)),
+      blur_radius_y_(std::min(blur_radius_y, 254)) {}
 
 void SWStackBlur::Blur() {
-  uint8_t* pixels = reinterpret_cast<uint8_t*>(src_->GetPixelAddr());
-  uint8_t* dst_pixels = reinterpret_cast<uint8_t*>(dst_->GetPixelAddr());
-
-  if (blur_radius_ <= 1) {
+  // A pass with radius <= 1 is the identity, but the horizontal pass must
+  // still copy the source into dst so the vertical pass (and the caller)
+  // sees the unmodified rows.
+  if (blur_radius_x_ <= 1) {
     auto bytes = std::min(src_->GetPixmap()->RowBytes() * src_->Height(),
                           dst_->GetPixmap()->RowBytes() * dst_->Height());
-    std::memcpy(dst_pixels, pixels, bytes);
-    return;
+    std::memcpy(dst_->GetPixelAddr(), src_->GetPixelAddr(), bytes);
+  } else {
+    BlurHorizontal(blur_radius_x_);
   }
+  if (blur_radius_y_ > 1) {
+    BlurVertical(blur_radius_y_);
+  }
+}
+
+void SWStackBlur::BlurHorizontal(int32_t blur_radius_) {
+  uint8_t* pixels = reinterpret_cast<uint8_t*>(src_->GetPixelAddr());
+  uint8_t* dst_pixels = reinterpret_cast<uint8_t*>(dst_->GetPixelAddr());
 
   int32_t div = 2 * blur_radius_ + 1;
   int32_t width = src_->Width();
@@ -160,6 +176,29 @@ void SWStackBlur::Blur() {
 
     yw += width;
   }
+}
+
+void SWStackBlur::BlurVertical(int32_t blur_radius_) {
+  uint8_t* dst_pixels = reinterpret_cast<uint8_t*>(dst_->GetPixelAddr());
+
+  int32_t width = src_->Width();
+  int32_t height = src_->Height();
+  int32_t width_minus_1 = width - 1;
+  int32_t height_minus_1 = height - 1;
+  int32_t radius_plus_1 = blur_radius_ + 1;
+  int32_t sum_factor = radius_plus_1 * (radius_plus_1 + 1) / 2;
+
+  int32_t stack_start = 0;
+  int32_t stack_end = radius_plus_1;
+
+  std::vector<glm::u64vec4> stack(2 * blur_radius_ + 1);
+
+  int32_t stack_in = 0;
+  int32_t stack_out = 0;
+  int32_t yi = 0;
+
+  int32_t mul_sum = GetMulSum(blur_radius_);
+  int32_t shr_sum = GetShrSum(blur_radius_);
 
   for (int32_t x = 0; x < width; x++) {
     yi = x << 2;

@@ -249,12 +249,15 @@ std::shared_ptr<Pixmap> ApplyDropShadowNode(const DropShadowImageFilter* filter,
   shadow_bounds.Offset(filter->GetOffsetX(), filter->GetOffsetY());
   out_bounds = bounds;
   out_bounds.Join(shadow_bounds);
-  const float radius =
-      std::round(std::max(filter->GetRadiusX(), filter->GetRadiusY()));
+  const int32_t radius_x =
+      static_cast<int32_t>(std::lround(std::min(filter->GetRadiusX(), 254.f)));
+  const int32_t radius_y =
+      static_cast<int32_t>(std::lround(std::min(filter->GetRadiusY(), 254.f)));
+  const float pad = static_cast<float>(std::max(radius_x, radius_y));
   // The shadow mask blurs out of a padded layer (SWStackBlur cannot grow
   // its support); the padded rect also spans the halo in the output.
   Rect padded =
-      ImageFilterBase::ApproximateFilteredBounds(shadow_bounds, radius, radius);
+      ImageFilterBase::ApproximateFilteredBounds(shadow_bounds, pad, pad);
   out_bounds.Join(padded);
   out_bounds = ImageFilterBase::ApproximateFilteredBounds(out_bounds, 0, 0);
 
@@ -274,7 +277,7 @@ std::shared_ptr<Pixmap> ApplyDropShadowNode(const DropShadowImageFilter* filter,
   auto shadow = MakeLayerPixmap(padded_bitmap.Width(), padded_bitmap.Height(),
                                 src->GetColorSpace());
   Bitmap shadow_bitmap(shadow, false);
-  SWStackBlur(&padded_bitmap, &shadow_bitmap, radius).Blur();
+  SWStackBlur(&padded_bitmap, &shadow_bitmap, radius_x, radius_y).Blur();
 
   // Tint with the declared color resolved into the layer space (the same
   // chain as the top-level DropShadowImageFilter::OnFilter).
@@ -317,12 +320,15 @@ std::shared_ptr<Pixmap> ApplyFilterNode(const ImageFilterBase* filter,
   switch (filter->GetType()) {
     case ImageFilterType::kBlur: {
       const auto* blur = static_cast<const BlurImageFilter*>(filter);
-      const float radius =
-          std::round(std::max(blur->GetRadiusX(), blur->GetRadiusY()));
+      const int32_t radius_x = static_cast<int32_t>(
+          std::lround(std::min(blur->GetRadiusX(), 254.f)));
+      const int32_t radius_y = static_cast<int32_t>(
+          std::lround(std::min(blur->GetRadiusY(), 254.f)));
       // SWStackBlur cannot grow its support: draw the content layer into a
       // padded layer first (the content centered under the halo).
-      Rect padded = ImageFilterBase::ApproximateFilteredBounds(node_bounds,
-                                                               radius, radius);
+      Rect padded = ImageFilterBase::ApproximateFilteredBounds(
+          node_bounds, static_cast<float>(radius_x),
+          static_cast<float>(radius_y));
       out_bounds = padded;
       auto dst = MakeLayerPixmap(static_cast<uint32_t>(padded.Width()),
                                  static_cast<uint32_t>(padded.Height()), space);
@@ -333,7 +339,7 @@ std::shared_ptr<Pixmap> ApplyFilterNode(const ImageFilterBase* filter,
       auto stage =
           MakeLayerPixmap(dst_bitmap.Width(), dst_bitmap.Height(), space);
       Bitmap stage_bitmap(stage, false);
-      SWStackBlur(&dst_bitmap, &stage_bitmap, radius).Blur();
+      SWStackBlur(&dst_bitmap, &stage_bitmap, radius_x, radius_y).Blur();
       return stage;
     }
     case ImageFilterType::kDropShadow:
@@ -422,8 +428,8 @@ void ImageFilterBase::BlurBitmapToCanvas(Canvas* canvas, Bitmap& bitmap,
                                          const Paint& paint, float radius_x,
                                          float radius_y) {
   Bitmap filtered_bitmap(bitmap.Width(), bitmap.Height(), kPremul_AlphaType);
-  SWStackBlur(&bitmap, &filtered_bitmap,
-              std::round(std::max(radius_x, radius_y)))
+  SWStackBlur(&bitmap, &filtered_bitmap, std::round(radius_x),
+              std::round(radius_y))
       .Blur();
   canvas->DrawImage(Image::MakeImage(filtered_bitmap.GetPixmap()),
                     filter_bounds, &paint);
