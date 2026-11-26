@@ -432,6 +432,12 @@ TEST(SimpleShapeGolden, DrawStrokeRRectBlending) {
 }
 
 TEST(SimpleShapeGolden, CoverageAwareBlendModes) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // Every leg compares against coverage-AA / contour-AA / simple-shape
+    // pipeline baselines; the software renderer has no such pipelines.
+    GTEST_SKIP() << "Tests the GPU coverage-aware pipelines";
+  }
   constexpr size_t kColumns = 5;
   constexpr std::array<skity::BlendMode, 16> kBlendModes = {
       skity::BlendMode::kClear,   skity::BlendMode::kSrc,

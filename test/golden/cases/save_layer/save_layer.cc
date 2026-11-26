@@ -164,6 +164,12 @@ TEST(SaveLayerGolden, ThreeCircle) {
 }
 
 TEST(SaveLayerGolden, TwoCircleWithTranslate) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // Composites through a MatrixTransform image filter on restore; nested
+    // filters have no CPU execution yet and the layer content would drop.
+    GTEST_SKIP() << "Nested image filters have no CPU execution yet";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(400.f, 400.f));
   auto canvas = recorder.GetRecordingCanvas();
