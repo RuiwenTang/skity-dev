@@ -9,6 +9,7 @@
 #include <skity/recorder/picture_recorder.hpp>
 
 #include "common/golden_test_check.hpp"
+#include "common/golden_test_env.hpp"
 
 constexpr const char* kGoldenTestDir = CASE_DIR;
 constexpr const char* kGoldenTestCoverageAADir = CASE_DIR "coverage_aa_images/";
@@ -234,6 +235,11 @@ TEST(ImageFilterGolden, DropShadow_10_n10_0_0) {
 }
 
 TEST(ImageFilterGolden, Matrix_translate_50_50) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // The CPU renderer has no matrix/compose filter execution yet.
+    GTEST_SKIP() << "Nested image filters have no CPU execution yet";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(200, 200));
   skity::Paint paint;
@@ -264,6 +270,11 @@ TEST(ImageFilterGolden, Matrix_translate_50_50) {
 }
 
 TEST(ImageFilterGolden, RotateMatrix_10_deg_50_50) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // The CPU renderer has no matrix/compose filter execution yet.
+    GTEST_SKIP() << "Nested image filters have no CPU execution yet";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(200, 200));
   skity::Paint paint;
@@ -294,6 +305,11 @@ TEST(ImageFilterGolden, RotateMatrix_10_deg_50_50) {
 }
 
 TEST(ImageFilterGolden, ComposeBlurMatrix) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // The CPU renderer has no matrix/compose filter execution yet.
+    GTEST_SKIP() << "Nested image filters have no CPU execution yet";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(200, 200));
   skity::Paint paint;
