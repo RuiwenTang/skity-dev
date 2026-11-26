@@ -829,6 +829,42 @@ allowlist 84 → **88**;全量 **139 过 / 24 败 / 147 跳**。渐变族仅剩
   golden-text 2/2**。M3-1 全部完成。剩余 149 skip = GPU 管线专属
   (coverage-AA/texture-copy/stencil overlap 等,已登记)+ 嵌套 filter
   族(6 case,等 CPU 嵌套执行)。
+
+### 嵌套 image filter CPU 执行(2026-11-26,M3-1 后续,commit 11d14b23)
+
+**交付**:`ApplyFilterNode` 递归核(image_filter.cc)——每节点先执行
+input 链,再分派:blur(自带 halo pad)/ drop shadow(声明色 resolve 进
+layer 空间 + shadow/src 合成)/ matrix(经变换重采样到映射 bounds)/
+color filter(declared blend 色按 GenerateBrush 同规则 resolve 后逐像素)/
+compose(递归 outer(inner))。结果以 `shared_ptr<Pixmap>` 传递(Bitmap
+move-disabled);内部合成用默认 paint(镜像 GPU filter graph,只有最终
+blit 带 paint)。`HandleFilter` 的 temp layer 改为覆盖**未扩展的 content
+bounds**(过滤器自己长输出;image filter 的 bounds 走多态
+`ComputeFastBounds`,matrix 变换/shadow offset 得以进层),叶子 OnFilter
+签名加 `content_bounds`;**mask filter 路径保持旧的预扩展层布局不变**
+(零风险)。
+
+**连环坑(全部实测定位)**:
+1. **`GetRadiusX()` 的语义是 radius 不是 sigma**(工厂收 sigma 经
+   `ConvertSigmaToRadius` 转换存储,`DropShadow(…,3,3,…)` 的 radius=4.33);
+2. **SWStackBlur 对贴边内容层的核偏斜**:内容满层(无 pad)时 blur 中部
+   alpha 塌到 ~4、角落反而 255——blur 叶子和 shadow mask 都必须先 pad
+   (内容居中,halo 预留);这也顺带解释了旧 DropShadow 布局的正确性
+   来源于预扩展层的内容居中;
+3. **wire 序列化的 DropShadow 是 `Matrix{ColorFilter{Blur}}` 的 input 链**
+   而非 Compose 树——`ImageFilterBase` 补 `GetInputs()`,核入口统一先跑
+   input 链(GPU 的 HandleImageFilter 同样尊重各节点 input);
+4. `Bitmap` 拷贝/移动构造均 delete——核返回值用 `shared_ptr<Pixmap>`
+   (Pixmap 的 Data 是 shared);
+5. **数值误读浪费时间**:把 `4278059008`(=0xFEFE0000,即 (254,0,0,254))
+   误读成 0xFF000030 绕了远路——实际只是 stack blur 内部 ~254 的已知
+   量化撞上 `EXPECT_EQ` 精确断言,software 下放宽 ±1 即可。
+
+**遗留登记**:`FailedSaveLayerPreservesMatrix` 仍 skip——它测 layer 内
+`SetMatrix` 的**设备绝对矩阵**语义(GPU 对 identity filter matrix 的
+layer 直接折叠),软件 layer 是局部矩阵坐标系,属独立的 layer-matrix
+语义对齐工作。**终态:全量 166 过 / 0 败 / 144 跳,allowlist 114/114,
+golden-text 2/2**;嵌套 filter 族 5 个 skip 全部解除。
 另:stack blur mask 内部覆盖 ~254(非精确 255),是 `EXPECT_EQ(direct,
 Color_RED)` 类精确断言在软件下的固有 1 值差来源。
 
