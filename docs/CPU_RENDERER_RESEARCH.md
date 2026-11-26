@@ -786,6 +786,28 @@ PathTransformFillType)、SimpleShape 残余 5(rrect 变换描边 + Coverage
 Aware + YinAndYang)、ClipRect/ClipPath、Gamma ColorFilter×2(457px,
 疑似 8bit 表量化 vs GPU 浮点)、DisplayP3AndLinearSRGBDecode、
 CullRectClipPathTransform、Tiger。
+
+**M3-1c 第二批(渐变 flags 族,2026-11-26,premul 插值域实现)**:
+渐变插值的 **premul 域(非零 gradientFlags)此前软件零消费者**——两列
+flag 变体渲染相同,半透明 stops 与 GPU 整面板发散(RadialGradientFlags
+差 3 万 px)。实现(commit bf882776):`GenerateBrush` 在 stop 空间
+resolve 之后 premul 化停点表(镜像 GPU 的 `Premul` uniform 上传,注意
+**不 clamp**——GPU 靠 shader 尾部 clamp 收敛);brush 侧
+`FinalizeColor4f` 按域量化——premul 域 clamp RGB 到 [0, A](shader 输出
+clamp 的镜像,同时把超 gamut 的 resolved stops(如 sRGB target 上的
+P3 红)折回规范 premul 域)并跳过尾部 round-premul;LUT 参考链
+`ReferenceGradientColor` 同构镜像。**两个连环坑**:①`GradientInfo` 的
+字段名是 `gradientFlags` 不是 `flags`(`flags` 是 `GradientOptions`
+的);②**LUT 线程缓存键必须含 premul_stops**——不透明/全透明的表
+premul 化后字节相同,不同 flag 变体会碰撞取错表(RadialGradientFlags
+修好 premul 后 diff 纹丝不动的根因)。验证:
+`GradientClampsBeforePremultiplying`(flags 双臂,clamp 语义)+
+`RadialGradientFlags` 直接过 GPU 共享基线;LinearGradientWithColor
+Stops(硬停点的 LUT 量化噪声 ≤4 契约)、Gradient/ImageShaderLocal
+Coordinates(陡峭渐变区的亚像素采样相位,紧邻列 RGB 交错)录 `_sw`。
+allowlist 84 → **88**;全量 **139 过 / 24 败 / 147 跳**。渐变族仅剩
+`FallbackPathAndRRect`(4×4 fallback 面板,row0 白 vs 蓝白的整块差,
+退化渐变 fallback 色选择与 GPU 的语义分歧,待深挖)。
 另:stack blur mask 内部覆盖 ~254(非精确 255),是 `EXPECT_EQ(direct,
 Color_RED)` 类精确断言在软件下的固有 1 值差来源。
 
