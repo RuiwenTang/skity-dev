@@ -74,6 +74,7 @@ constexpr char kSoftwareGoldenFilter[] =
     "GradientGolden.RadialGradientFallbackTileMode:"
     "GradientGolden.LinearGradientTileMode:GradientGolden.RadialGradient:"
     "GradientGolden.RadialGradient2:GradientGolden.TwoPointConicalGradient_*:"
+    "GradientGolden.FallbackPathAndRRect:"
     "GradientGolden.RadialGradientFlags:"
     "GradientGolden.LinearGradientWithColorStops:"
     "GradientGolden.GradientLocalCoordinates:"
