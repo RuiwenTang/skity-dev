@@ -8,24 +8,21 @@
 // library's copy, leaving those binaries with two independent mirrors - the
 // A/B arms toggled a state the renderer (inside libskity) never read, so
 // every legacy arm silently measured the accelerated path. Keeping the
-// state in skity leaves exactly one mirror per process.
+// switch entry in skity leaves exactly one mirror per process.
+//
+// The state itself now lives in the process-wide SWContext singleton; these
+// entry points are thin delegates over it (see sw_context.hpp).
 
-#include <atomic>
+#include <skity/render/sw_context.hpp>
 
 #include "src/render/sw/accel/sw_accel.hpp"
 
 namespace skity {
 namespace sw_accel {
 
-namespace {
-std::atomic<bool> g_runtime_enabled{true};
-}  // namespace
+void SetEnabled(bool enabled) { SWContext::Get()->SetAccelEnabled(enabled); }
 
-void SetEnabled(bool enabled) {
-  g_runtime_enabled.store(enabled, std::memory_order_relaxed);
-}
-
-bool IsEnabled() { return g_runtime_enabled.load(std::memory_order_relaxed); }
+bool IsEnabled() { return SWContext::Get()->AccelEnabled(); }
 
 }  // namespace sw_accel
 }  // namespace skity

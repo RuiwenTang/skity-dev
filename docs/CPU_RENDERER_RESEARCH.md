@@ -150,7 +150,8 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   fetch→blend、删加速态 BrushH)|
   unit + 软件 golden(`--backend=software`,已全绿)+ 分段/逐次绘制基准 |
 | M3 验收 ✅(2026-11-26 功能对齐完成,CI 部分推迟) | CPU golden 通道(DisplayList→PNG diff);与 GPU/SwiftShader ±1~2/255 交叉容差 | test-runner 增加 CPU 后端。**实际落地**:test-runner `--backend=software` + 软件 golden 全量 310 case **167 过 / 0 败 / 143 跳**(skip 均为已登记的 GPU 管线专属),allowlist 115 全绿;渲染器真修复 10 处(leading kDifference、DropShadow 三连、SaveLayer 空间、blend filter resolve、premul 插值域、嵌套 image filter CPU 执行、各向异性 blur、设备对齐 layer);±1~2 已知差异族全部量化登记。**交叉容差设施与 Linux SwiftShader CI job 推迟到 PR 阶段**(不提 PR 时 CI 不会跑,见 M3-0 记录的豁免清单) | test-runner 增加 CPU 后端 ✅ |
-| M4 扩展 | DisplayList band 并行、AVX-512 评估、mipmap。**mipmap 现状
+| M4 扩展 | DisplayList band 并行(立即模式并行的三路径取舍与路径 B
+  准入判定见下方「M4 前置讨论」)、AVX-512 评估、mipmap。**mipmap 现状
   (2026-11-24 摸底):两侧均未端到端实现——GPU 采样器描述符已传
   MipmapMode(gpu_sampler.cc)但 `FindOrCreateTexture` 构造 TextureImpl
   恒 `mipmapped_=false`,`UploadTextureImage` 永远单 level,
@@ -931,6 +932,117 @@ specific 缺 `_sw`,归第 1 层批量)。全量 310 case 终态:
 非贪婪跨测试串位曾误报 8 个"全量失败/单独通过"的假阳性,引出一次
 "跨 case 污染"误判(逐 suite 二分 + JSON 权威列表复核后排除);gtest
 json 报告的 failure 列表才是权威。
+
+### M4 前置讨论(2026-11-26,立即模式并行的路径取舍)
+
+M4 band 并行锚定 DisplayList 回放,但 SWCanvas 默认立即模式(OnDrawXxx
+直拍光栅化,OnFlush 为空)——非 DisplayList 调用方的并行需求真实存在。
+band 并行的机制前提是「**有全局视野的集中执行**」(拿到完整命令流才能做
+band 过滤/调度/interleave),立即模式每 draw 即执行、无全局视野,必须先
+攒批。三条路径:
+
+- **路径 A 内部隐式批化**(blend2d BLContext 的实际形态:立即 API +
+  内部命令队列 + flush 集中执行):`DisplayList::Draw(Canvas*)` 本身也是
+  逐条虚调用,**执行器可与 DisplayList 回放共用同一套「命令批 + band
+  执行器」**,SWCanvas 增量仅内部队列 + flush 点(显式 OnFlush/surface
+  回读/析构)。代价:读 dst 操作前强制 flush、错误报告延迟、队列持资源
+  延长生命周期;
+- **路径 B 单 draw 粒度 band 并行**(零语义变化):WalkEdges/AEL 为
+  y 单调扫描,band 间行区间不相交、天然无竞争无需排序;clip/matrix 在
+  draw 入口已解析为只读。对大图元(Tiger/全屏 path)有效,对海量小
+  draw 无效(线程同步开销吃掉收益);相当于 blend2d 两遍调度中「band 级」
+  那一遍的退化形态(少了跨 draw 的 job 合并);
+- **路径 C 不做,靠进程级并发**(决策 4 主答案):立即模式单帧重的
+  调用方迁移 DisplayList 成本低(设施现成,还能吃跨帧缓存)。
+
+结论:**M4 执行器做在公共层**(DisplayList 回放与 SWCanvas 内部队列
+共享),DisplayList 重入回放先落地;SWCanvas 隐式批化为同一切片的可选
+后半段;路径 B 可作低风险起点单独评估。前置待确认:SSR 实际调用方
+立即模式 vs Picture/DisplayList 的占比(主流已录制回放则路径 A 降级为
+「执行器预留接口、不实现前端」)。
+
+**路径 B 准入判定**(判据不是面积,是工作量——面积只是最方便的代理
+变量):
+
+- 判定式:`预估串行耗时 × (1-1/N) > 并行固定开销` → 切 band。面积是
+  坏代理的场景:细长对角线(bounds 大覆盖窄)、大 bounds 被 clip 削到
+  一角、hairline(bounds 高但每行覆盖 1px);且精确覆盖要光栅化完才知道,
+  **只能用保守上界**;
+- 入口零成本可得的估计量:`bounds ∩ clip` 面积 → 合成工作量
+  (~1.2-5 ns/px 按 paint 分档,solid ≈1.5、gradient/image 采样 3-5);
+  bounds 高度 × 边数 → walk 工作量 ∝ 边数 × 高度(verb 计数用 path
+  现成字段,勿临时遍历链表);paint 类型定每 px 系数 + gradient 的
+  thread_local LUT 每 worker 首建税(~10μs 级,见 M1b 多线程注意);
+- 盈亏平衡数量级(锚点推算):并行固定开销 = dispatch + join fence +
+  band 起始活跃边重建(边按 ymin 分桶)+ LUT 首建,估 10-30μs;按 8
+  线程、综合 2-4 ns/px:小 draw 6×5 矩形 ≈0.1μs(锚点 810 ns/draw)
+  并行必亏;盈亏平衡 = 串行 50-100μs ≈ **2-5 万 px 实覆盖(~150²-220²
+  实心块)**;1080p 全屏 solid ≈3ms → 8 线程 ~400μs,阈值无感。中间
+  地带窄,粗阈值即可正确决策,不需要精细模型;
+- **两级门**:第一门 `bounds ∩ clip` 面积 < ~4096px(64×64)无条件
+  串行(挡掉 99% 小 draw;glyph run 走 atlas 不进此路);第二门过门后
+  估算串行耗时超阈值才并行,**band 数随面积自适应**(blend2d band 高度
+  8-64 可变同逻辑,cell 缓冲 ≤256KB 约束单 band 内存),边多的大 path
+  光栅化项重、同样过门;
+- 校准:`sw_benchmarks.cc` 加「同一 draw 串行 vs band 并行」面积扫描
+  (32² → 1080p 对数),交叉点读出 + 2-3 倍安全余量定阈值(宁可漏并行
+  不可错并行——错并行在小 draw 密集场景是净亏损)。
+
+**配置载体定稿(2026-11-26,并行化前置)**:SWCanvas 目前零配置入口
+(`MakeSoftwareCanvas(Bitmap*)`),accel 开关是进程级原子变量——引入
+`SWContextOptions`(纯配置 POD,先例 = blend2d `BLContextCreateInfo` /
+`GrContextOptions`):
+
+- 作用域分层「**能力进程级,策略 Context 级**」:Validate 保险丝/CPU
+  检测/glyph atlas/线程池留进程级;`accel_enabled`、`parallel_enabled`、
+  `thread_count` 是调用方对本次渲染的意图,随 canvas 走(SSR 单进程多
+  请求下进程级可变全局会互相污染);
+- `thread_count`:0=auto(hardware_concurrency,进程级检测一次)、
+  1=强制串行(等价 parallel_enabled=false);
+- 注入路径三处:MakeSoftwareCanvas 加带 options 的重载(默认参数=现行
+  为零破坏)、layer sub-canvas 继承父配置、C API 的 CPU surface 分支
+  (M3 已登记遗留一起做);**不做重 SWContext 对象**(GPU Context 持
+  设备资源才需要,SW 侧 options 值拷贝进 canvas 成员即可,几个字节);
+- **配置解析纪律(M2-0 双镜像教训的推论)**:canvas 创建时解析一次,
+  下游(brush/fill 路径)全部值传递,不回头读任何全局;现有
+  `SetEnabled/IsEnabled` 语义降级为「修改后续创建 canvas 的默认值」,
+  A/B 基准逐步迁移到 options 直传;
+- **线程池 = 进程级单池(定稿)**:重设施不随 Context 复制(N 个
+  Context ×M 线程爆炸),Context options 只配配额(执行时取
+  min(配置, 池容量));池接口按「借 N 线程执行一批 job」设计,不暴露
+  池本身,留将来 per-request 差异化的升级缝。
+
+**勘误与落地形态(2026-11-26,实现时两轮修订)**:上文的 per-canvas
+`SWContextOptions` 方案被否——`SWCanvas(Bitmap*, const SWContextOptions&)`
+签名把配置摆成了「画布实例级选项」,而这些是渲染环境级属性(线程数
+尤其不该是画布参数;layer 子画布靠内部值穿透也别扭);显式多实例
+`Create(options)` + `GetDefaultSWContext()` 双入口方案随后也被否
+(`Create` 会被误认成返回默认实例)。**最终落地:`SWContext` 进程级
+单例,唯一入口 `Get()`,配置走运行期原子 setter**
+(`AccelEnabled/SetAccelEnabled`、`ParallelEnabled/SetParallelEnabled`、
+`ThreadCount/SetThreadCount`,0=auto→hardware_concurrency),公共头
+`include/skity/render/sw_context.hpp`。要点:
+- `sw_accel::SetEnabled/IsEnabled` 变为单例的薄委托(独立全局原子
+  删除),现有消费者(example 按键、单测 RAII、bench AccelToggle)
+  零改动;**canvas/brush 每 draw 读单例**(`SWCanvas::context_`、
+  `SWSpanBrush::GetContext()`),运行期切换下一 draw 生效,example
+  无需重建 canvas;「每 draw 读」与「解析一次值传递」的纪律不矛盾——
+  目的本来就是单一数据源(单一镜像),单例原子正是唯一事实来源;
+- `MakeSoftwareCanvas` 公共 API 零变化;canvas/brush 持 `SWContext*`
+  的间接点即将来多实例化的升级缝;
+- 渲染路径 5 处 `IsEnabled()` 读取点清零(grep 验收),4 个内核入口
+  的「caller must check」契约措辞改为「caller 门卫 SWContext accel
+  gate」,内核行为零变化(仍只查 `Available()` 保险丝);
+- 验证:新增 `sw_context_test.cc` 3 项(单例性/委托等价双方向/
+  **canvas 创建后切换仍到达渲染器**——梯度 LUT vs 标量差异断言,
+  双镜像缺陷的语义级守卫);unit 1290/1290;software golden-shape
+  全量 166 过 0 败 143 skip + golden-text 2/2。
+- **附带发现的既有回归(与本改动无关,stash 对比证实)**:
+  `ImageFilterGolden.BlurFilter_10_5_Perspective` 在 software 后端
+  确定性崩溃于 `sw_raster.cc:461` 的 AEL 不变量
+  `DEBUG_CHECK(curr_edge->lower_y >= next_y)`(透视矩阵下边跨越
+  违反扫描区间假设;疑似 c2d525a6 各向异性 blur/设备对齐 layer 引入,
+  M3 记录的 115/115 全绿不含此崩溃)。待单独归因修复。
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 

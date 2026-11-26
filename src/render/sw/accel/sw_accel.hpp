@@ -46,14 +46,17 @@ bool Validate();
 bool Available();
 
 // Dev/testing facility: process-global runtime switch for the accelerated
-// path, on by default. Defined in the skity target itself (one mirror per
-// process), not in the skity_sw_accel archive: test and benchmark
-// executables link the archive statically, and a switch defined there would
-// shadow the shared library's copy, making A/B arms toggle a state the
-// renderer never read. When off, the brush layer falls back to the legacy
-// scalar path within the same binary - for A/B comparisons of rendering
-// results and performance. Compile-time exclusion (SKITY_SW_ACCEL=OFF)
-// remains the packaging knob.
+// path, on by default. A thin delegate over the process-wide SWContext
+// singleton (SWContext::Get()->SetAccelEnabled/AccelEnabled), kept as an
+// exported symbol for existing dev tooling. Defined in the skity target
+// itself (one mirror per process), not in the skity_sw_accel archive: test
+// and benchmark executables link the archive statically, and a switch
+// defined there would shadow the shared library's copy, making A/B arms
+// toggle a state the renderer never read. When off, the renderer falls back
+// to the legacy scalar path within the same binary - for A/B comparisons of
+// rendering results and performance. Takes effect on the next draw; canvases
+// read the context per draw, no recreation needed. Compile-time exclusion
+// (SKITY_SW_ACCEL=OFF) remains the packaging knob.
 SW_ACCEL_API void SetEnabled(bool enabled);
 SW_ACCEL_API bool IsEnabled();
 
@@ -65,9 +68,9 @@ SW_ACCEL_API bool IsEnabled();
 // Spans are clamped to [0, width) x [0, height) like SWSpanBrush::Brush.
 //
 // Supported modes today: every Porter-Duff coeff mode (kClear through
-// kScreen, including the kDst no-op). The caller must check IsEnabled()
-// first (the kernels do not read the runtime switch; the state lives in the
-// skity target). Returns false (and does nothing) when the mode is
+// kScreen, including the kDst no-op). The caller must gate on
+// SWContext::AccelEnabled() first (the kernels do not read the context
+// themselves). Returns false (and does nothing) when the mode is
 // unsupported or the accelerator is unavailable (Validate fuse), in which
 // case the caller must use the legacy brush path.
 bool FillSolidSpans(BlendMode mode, uint32_t src_pm, uint8_t* dst_base,
@@ -147,7 +150,8 @@ const uint32_t* AcquireGradientLUT(const GradientParams& params);
 // and blends it through the per-pixel-src engines - the row-buffer handoff
 // keeps one blend call per chunk instead of per-pixel virtual work. The
 // cross-channel HSL modes keep a scalar blend. Like FillSolidSpans, the
-// caller must check IsEnabled() first. Returns false (without touching
+// caller must gate on SWContext::AccelEnabled() first. Returns false
+// (without touching
 // pixels) when the gradient type or blend mode is unsupported or the
 // accelerator is unavailable (Validate fuse), in which case the caller must
 // use the legacy brush path.
@@ -200,7 +204,8 @@ bool SupportsImageMode(BlendMode mode);
 // surface). Bit-exact with the legacy scalar brush for every supported
 // configuration; kSrc / kSrcOver only.
 //
-// Like FillSolidSpans, the caller must check IsEnabled() first. Returns
+// Like FillSolidSpans, the caller must gate on SWContext::AccelEnabled()
+// first. Returns
 // false (without touching pixels) when the configuration is unsupported or
 // the accelerator is unavailable (Validate fuse), in which case the caller
 // must use the legacy brush path.
@@ -217,7 +222,7 @@ bool FillImageSpans(const ImageParams& params, BlendMode mode,
 // clip (the caller shifts it, or lets this function do it - pass the
 // unclipped rect and the mask covering it). kSrc / kSrcOver only; other
 // modes go through the scalar mask blend. Like FillSolidSpans, the caller
-// must check IsEnabled() first.
+// must gate on SWContext::AccelEnabled() first.
 bool BlendMaskRect(BlendMode mode, uint32_t src_pm, uint8_t global_alpha,
                    uint8_t* dst_base, size_t row_bytes, int32_t dst_width,
                    int32_t dst_height, int32_t x, int32_t y,

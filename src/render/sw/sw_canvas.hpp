@@ -8,6 +8,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <memory>
 #include <skity/render/canvas.hpp>
+#include <skity/render/sw_context.hpp>
 
 #include "src/render/canvas_state.hpp"
 #include "src/render/sw/sw_raster_clip.hpp"
@@ -189,6 +190,9 @@ class SWCanvas : public Canvas {
 
  private:
   Bitmap* bitmap_;
+  // Process-wide renderer configuration (accel / parallel switches); read
+  // per draw so runtime toggles take effect without recreating the canvas.
+  SWContext* context_ = SWContext::Get();
   // TODO(tangruiwen) state can use copy on write time template
   std::vector<State> state_stack_;
   std::vector<std::unique_ptr<LayerState>> layer_stack_;

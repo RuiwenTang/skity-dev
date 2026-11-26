@@ -104,6 +104,7 @@ add_executable(skity_unit_test
     render/canvas_state_test.cc
     render/sw_canvas_test.cc
     render/sw_accel_test.cc
+    render/sw_context_test.cc
     render/sw_coverage_test.cc
     render/sw_raster_clip_test.cc
     render/hw/hw_buffer_layout_test.cc

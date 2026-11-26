@@ -13,6 +13,7 @@
 #include <skity/graphic/color_space.hpp>
 #include <skity/graphic/sampling_options.hpp>
 #include <skity/graphic/tile_mode.hpp>
+#include <skity/render/sw_context.hpp>
 #include <vector>
 
 #ifdef SKITY_SW_ACCEL
@@ -31,15 +32,20 @@ enum class BlendMode;
 
 class SWSpanBrush {
  public:
+  // context carries the runtime renderer configuration (accel switch,
+  // parallelism); brushes read it per draw. Defaults to the process-wide
+  // singleton, which is also what SWCanvas passes explicitly.
   SWSpanBrush(std::vector<Span> const& spans, Bitmap* bitmap,
-              ColorFilter* color_filter, BlendMode blend, float global_alpha)
+              ColorFilter* color_filter, BlendMode blend, float global_alpha,
+              const SWContext* context = nullptr)
       : p_spans_(spans.data()),
         spans_size_(spans.size()),
         bitmap_(bitmap),
         color_filter_(color_filter),
         blend_(blend),
         global_alpha_(static_cast<uint8_t>(255 * global_alpha)),
-        render_target_(bitmap_) {}
+        render_target_(bitmap_),
+        context_(context ? context : SWContext::Get()) {}
 
   virtual ~SWSpanBrush() = default;
 
@@ -59,6 +65,8 @@ class SWSpanBrush {
 
   Bitmap* CurrentBitmap() const { return bitmap_; }
 
+  const SWContext* GetContext() const { return context_; }
+
   BlendMode GetBlendMode() const { return blend_; }
 
   SWRenderTarget& GetRenderTarget() { return render_target_; }
@@ -74,6 +82,9 @@ class SWSpanBrush {
   BlendMode blend_;
   uint8_t global_alpha_;
   SWRenderTarget render_target_;
+  // The process-wide renderer configuration (never null; the singleton
+  // outlives every brush).
+  const SWContext* context_ = nullptr;
   // Dense color row shared by every span of one draw: produced per span and
   // handed to the target in a single blend call, so the legacy path never
   // materializes a heap buffer per span.

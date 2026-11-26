@@ -630,6 +630,7 @@ if(${SKITY_SW_RENDERER})
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_stack_blur.cc
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_stack_blur.hpp
     ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_subpixel.hpp
+    ${CMAKE_CURRENT_LIST_DIR}/render/sw/sw_context.cc
   )
 endif()
 

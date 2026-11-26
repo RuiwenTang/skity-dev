@@ -540,7 +540,8 @@ class AcceleratedGradientColorBrush : public GradientColorBrush {
     // params (including the LUT build) are constructed here, once, lazily -
     // and only when the accelerator would actually run, so the legacy
     // fallback arm never pays for them.
-    if (!params_built_ && sw_accel::IsEnabled() && sw_accel::Available()) {
+    if (!params_built_ && GetContext()->AccelEnabled() &&
+        sw_accel::Available()) {
       params_built_ = true;
       use_accel_ = BuildParams();
     }
@@ -740,7 +741,7 @@ void PixmapBrush::Brush() {
   // The whole span list goes through the SIMD fetch + blend kernels in one
   // pass when the draw matches the accelerated configurations built by the
   // constructor; the kernel reproduces the scalar chain bit-exactly.
-  if (accel_ok_ && sw_accel::IsEnabled() && sw_accel::Available()) {
+  if (accel_ok_ && GetContext()->AccelEnabled() && sw_accel::Available()) {
     Bitmap* bitmap = CurrentBitmap();
     if (sw_accel::FillImageSpans(accel_params_, GetBlendMode(),
                                  bitmap->GetPixelAddr(), bitmap->RowBytes(),

@@ -84,8 +84,8 @@ std::shared_ptr<ColorFilter> ResolveColorFilterForTarget(
 // legacy brush when anything is unsupported.
 static bool TryAccelerateSolidFill(std::vector<Span> const& spans,
                                    const Paint& paint, bool stroke,
-                                   Bitmap* bitmap) {
-  if (!sw_accel::IsEnabled() || spans.empty() || paint.GetShader() ||
+                                   Bitmap* bitmap, const SWContext* context) {
+  if (!context->AccelEnabled() || spans.empty() || paint.GetShader() ||
       paint.GetColorFilter() ||
       !sw_accel::SupportsSolidMode(paint.GetBlendMode()) ||
       bitmap->GetAlphaType() != AlphaType::kPremul_AlphaType ||
@@ -257,7 +257,7 @@ void SWCanvas::DoBrush(const SWRaster& raster, const Paint& paint,
   }
 
 #ifdef SKITY_SW_ACCEL
-  if (TryAccelerateSolidFill(*spans, paint, stroke, bitmap_)) {
+  if (TryAccelerateSolidFill(*spans, paint, stroke, bitmap_, context_)) {
     return;
   }
 #endif
@@ -604,7 +604,7 @@ void SWCanvas::FillGlyphs(uint32_t count, const GlyphID* glyphs,
               }
 #ifdef SKITY_SW_ACCEL
               bool blended = false;
-              if (sw_accel::IsEnabled()) {
+              if (context_->AccelEnabled()) {
                 blended = sw_accel::BlendMaskRect(
                     paint.GetBlendMode(), color_pm, global_alpha,
                     bitmap_->GetPixelAddr(), bitmap_->RowBytes(), surface_w,
@@ -622,7 +622,7 @@ void SWCanvas::FillGlyphs(uint32_t count, const GlyphID* glyphs,
           } else {
 #ifdef SKITY_SW_ACCEL
             bool blended = false;
-            if (sw_accel::IsEnabled()) {
+            if (context_->AccelEnabled()) {
               blended = sw_accel::BlendMaskRect(
                   paint.GetBlendMode(), color_pm, global_alpha,
                   bitmap_->GetPixelAddr(), bitmap_->RowBytes(), surface_w,

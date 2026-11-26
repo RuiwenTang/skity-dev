@@ -882,8 +882,8 @@ bool SupportsSolidMode(BlendMode mode) {
 bool FillSolidSpans(BlendMode mode, uint32_t src_pm, uint8_t* dst_base,
                     size_t row_bytes, int32_t width, int32_t height,
                     const Span* spans, size_t span_count) {
-  // Callers gate on IsEnabled() (the runtime switch lives in the skity
-  // target, not this archive); only the Validate fuse is checked here.
+  // Callers gate on SWContext::AccelEnabled() (the context lives in the
+  // skity target, not this archive); only the Validate fuse is checked here.
   if (!Available()) {
     return false;
   }
@@ -1045,7 +1045,8 @@ const uint32_t* AcquireGradientLUT(const GradientParams& params) {
 bool FillGradientSpans(const GradientParams& params, BlendMode mode,
                        uint8_t* dst_base, size_t row_bytes, int32_t width,
                        int32_t height, const Span* spans, size_t span_count) {
-  // Same contract as FillSolidSpans: the caller checked IsEnabled().
+  // Same contract as FillSolidSpans: the caller checked the SWContext accel
+  // gate.
   if (!Available()) {
     return false;
   }
@@ -1149,7 +1150,8 @@ bool SupportsImageMode(BlendMode mode) {
 bool FillImageSpans(const ImageParams& params, BlendMode mode,
                     uint8_t* dst_base, size_t row_bytes, int32_t width,
                     int32_t height, const Span* spans, size_t span_count) {
-  // Same contract as FillSolidSpans: the caller checked IsEnabled().
+  // Same contract as FillSolidSpans: the caller checked the SWContext accel
+  // gate.
   if (!Available()) {
     return false;
   }
@@ -1208,7 +1210,8 @@ bool BlendMaskRect(BlendMode mode, uint32_t src_pm, uint8_t global_alpha,
                    int32_t dst_height, int32_t x, int32_t y,
                    const uint8_t* mask, size_t mask_stride, int32_t width,
                    int32_t height) {
-  // Same contract as FillSolidSpans: the caller checked IsEnabled().
+  // Same contract as FillSolidSpans: the caller checked the SWContext accel
+  // gate.
   if (!Available()) {
     return false;
   }
