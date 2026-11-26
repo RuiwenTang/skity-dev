@@ -195,6 +195,9 @@ class SWCanvas : public Canvas {
   SWCanvas* parent_canvas_ = nullptr;
   Vec2 global_offset_ = Vec2{0.f, 0.f};
   bool drawing_layer_ = false;
+  // Holds the target-resolved blend filter for the in-flight brush; brushes
+  // keep a raw pointer, so the replacement must outlive GenerateBrush.
+  std::shared_ptr<ColorFilter> resolved_color_filter_;
 };
 
 }  // namespace skity

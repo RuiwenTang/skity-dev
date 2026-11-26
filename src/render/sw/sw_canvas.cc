@@ -19,6 +19,7 @@
 #ifdef SKITY_SW_ACCEL
 #include "src/render/sw/accel/sw_accel.hpp"
 #endif
+#include "src/effect/color_filter_base.hpp"
 #include "src/effect/gradient_fallback.hpp"
 #include "src/effect/image_filter_base.hpp"
 #include "src/effect/mask_filter_priv.hpp"
@@ -47,6 +48,33 @@ constexpr ColorType ToColorType(BitmapFormat bitmap_format) {
     case BitmapFormat::kUnknown:
       return ColorType::kUnknown;
   }
+}
+
+// A blend filter color recorded in a declared space resolves into the
+// target (bitmap) space at draw time, mirroring the GPU uniform
+// resolution; the CPU filter otherwise quantizes the declared bytes as
+// sRGB (it has no target context at construction time).
+std::shared_ptr<ColorFilter> ResolveColorFilterForTarget(
+    const std::shared_ptr<ColorFilter>& filter,
+    const std::shared_ptr<const ColorSpace>& target_space) {
+  if (!filter) {
+    return {};
+  }
+  auto* base = As_CFB(filter.get());
+  if (base->GetType() != ColorFilterType::kBlend) {
+    return filter;
+  }
+  auto* blend = static_cast<BlendColorFilter*>(base);
+  const auto& declared = blend->GetColorSpace();
+  if (ColorSpaceEquals(declared, target_space)) {
+    return filter;
+  }
+  Color4f resolved = blend->GetColor4f();
+  auto steps = ColorTransformSteps::Resolve(declared, target_space);
+  if (!steps.IsNoop()) {
+    resolved = steps.Apply(resolved);
+  }
+  return ColorFilters::Blend(resolved, blend->GetBlendMode(), nullptr);
 }
 }  // namespace
 
@@ -104,6 +132,11 @@ void SWCanvas::LayerState::Init(SWCanvas* parent_canvas, Vec2 offset) {
       static_cast<uint32_t>(std::ceil(rel_bounds.Width())),
       static_cast<uint32_t>(std::ceil(rel_bounds.Height())),
       AlphaType::kPremul_AlphaType);
+  // Layers live in the target canvas' color space: content drawn into the
+  // layer and the layer composited back must not gain conversions.
+  this->bitmap->GetPixmap()->SetColorInfo(
+      AlphaType::kPremul_AlphaType, ColorType::kRGBA,
+      parent_canvas->bitmap_->GetPixmap()->GetColorSpace());
 
   this->canvas = parent_canvas->CreateSubCanvas(
       bitmap.get(), offset + Vec2{rel_bounds.Left(), rel_bounds.Top()});
@@ -740,6 +773,11 @@ uint32_t SWCanvas::OnGetHeight() const { return bitmap_->Height(); }
 std::unique_ptr<SWSpanBrush> SWCanvas::GenerateBrush(
     std::vector<Span> const& spans, skity::Paint const& paint, bool stroke,
     Rect const& bounds) {
+  // Brushes keep a raw ColorFilter*; the resolved filter outlives the call
+  // through this member (brushes are consumed synchronously).
+  resolved_color_filter_ = ResolveColorFilterForTarget(
+      paint.GetColorFilter(), bitmap_->GetPixmap()->GetColorSpace());
+  auto color_filter = resolved_color_filter_;
   auto shader = paint.GetShader();
   if (shader) {
     const auto* image_ptr = paint.GetShader()->AsImage();
@@ -765,7 +803,7 @@ std::unique_ptr<SWSpanBrush> SWCanvas::GenerateBrush(
       if (NeedsFallbackToSolidColor(type, info, fallback_color)) {
         fallback_color.a *= paint.GetAlphaF();
         return std::make_unique<SolidColorBrush>(
-            spans, bitmap_, paint.GetColorFilter().get(), paint.GetBlendMode(),
+            spans, bitmap_, color_filter.get(), paint.GetBlendMode(),
             fallback_color);
       }
       Matrix device_to_local;
@@ -783,8 +821,8 @@ std::unique_ptr<SWSpanBrush> SWCanvas::GenerateBrush(
       }
 
       return GradientColorBrush::MakeGradientColorBrush(
-          spans, bitmap_, paint.GetColorFilter().get(), paint.GetBlendMode(),
-          info, type, device_to_local);
+          spans, bitmap_, color_filter.get(), paint.GetBlendMode(), info, type,
+          device_to_local);
     } else if (image_ptr) {
       const auto& image = *image_ptr;
       assert(image->GetPixmap());
@@ -813,7 +851,7 @@ std::unique_ptr<SWSpanBrush> SWCanvas::GenerateBrush(
       }
 
       return std::make_unique<PixmapBrush>(
-          spans, bitmap_, paint.GetColorFilter().get(), paint.GetBlendMode(),
+          spans, bitmap_, color_filter.get(), paint.GetBlendMode(),
           paint.GetAlphaF(), std::move(pixmap), matrix,
           *pixmap_shader->GetSamplingOptions(), pixmap_shader->GetXTileMode(),
           pixmap_shader->GetYTileMode(), bitmap_->GetPixmap()->GetColorSpace());
@@ -828,8 +866,7 @@ std::unique_ptr<SWSpanBrush> SWCanvas::GenerateBrush(
   Color4f color = stroke ? paint.GetStrokeColor(bitmap_space)
                          : paint.GetFillColor(bitmap_space);
 
-  return std::make_unique<SolidColorBrush>(spans, bitmap_,
-                                           paint.GetColorFilter().get(),
+  return std::make_unique<SolidColorBrush>(spans, bitmap_, color_filter.get(),
                                            paint.GetBlendMode(), color);
 }
 
