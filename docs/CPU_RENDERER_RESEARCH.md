@@ -743,6 +743,31 @@ Blur/DropShadow 叶子,`MatrixImageFilter`/`ColorFilterImageFilter` 无 CPU
 `OnFilter`(基类空实现)→ 嵌套回放 no-op,case 已加 software skip;
 **嵌套 image filter 的 CPU 组合执行**列为 M3-1a 后续工作(也是
 ImageFilterGolden 的 Matrix/Compose 系列第 3 层失败的候选根因之一)。
+
+### M3-1b 记录(2026-11-26,AA 边缘批量 + GPU 管线段 gating)
+
+- **20 个 AA 边缘 case 录 `_sw` 并进 allowlist(57 → 77 全绿)**:
+  描边宽窄(Tiny/Large/Scaled)、TileBoundary、ConcaveSelfIntersecting、
+  Curves、CanonicalEdgesExact(746px 全 ≤2 但超 50px 数量门槛)、
+  SimpleShape 7 个(rrect 描边/DRRect/filled)、Recorder CullRect 5 个、
+  ClipRRectDifference。抽验目检:filled_rrect diff 94% 部分覆盖像素
+  (标准边缘带);curves/tiny_stroke 的 diff 像素不透明(覆盖内外判定
+  的浮点边界差,同族);
+- **GPU 管线段 gating(不是软件路径的段不再跑)**:整 case skip ×6
+  (StrokeDepthOverlap=stencil overlap exact、TextureCopyPreserves
+  =texture-copy 合成、FilledRRect45=simple-shape 解析边、Conflation×2、
+  ClipUsesGlobalBounds=coverage-AA 基线);多段 case 的 GPU 段
+  (coverage/contour/simple-shape)改为**条件包裹**而非 GTEST_SKIP——
+  教训:已 PASS 的比较之后再 GTEST_SKIP 会把整个 case 报成 SKIPPED,
+  掩盖第一段的验证结果;Recorder 的 CompareRecorderGolden helper 对
+  coverage_aa 段 early-return;
+- **录制工具坑**:`SKITY_UPDATE_MISSING_GOLDEN=1` 会让**所有段**都录
+  (含 GPU 变体目录 coverage_aa_images/ 等),多段 case 录制前先加
+  gating,或录制后删除变体目录的 `_sw`(本轮删了 11 个误录);
+- 全量终态:**128 过 / 38 败 / 144 跳**(M3-0 起点 104/124+2 崩),
+  剩余 38 = 第 2/3 层(Blur 族 5、渐变 flags 族 3、ClipPath/ClipRect、
+  CoverageAware、Tiger、SaveLayer 大场景等)+ 嵌套 filter 族
+  (ImageFilter Matrix/Compose 3 个)。
 另:stack blur mask 内部覆盖 ~254(非精确 255),是 `EXPECT_EQ(direct,
 Color_RED)` 类精确断言在软件下的固有 1 值差来源。
 
