@@ -890,9 +890,15 @@ golden-text 2/2**;嵌套 filter 族 5 个 skip 全部解除。
 **宽度泛化补遗(2026-11-26,commit 6527eacd)**:审查发现内核仍残留
 **硬编码的定长栈缓冲**(src_bytes/dst_buf/color_bytes/mask_buf 的
 `[64]`、梯度 LUT gather 表与图像 bilinear tap 表的 `[16]` ×14 处)——
-循环上限全部按 `Lanes()` 参数化,启用目标集(≤512-bit,HWY_MAX_BYTES
-== 64)下行为正确,但更宽目标会静默栈溢出。已统一改为
-`HWY_MAX_BYTES` / `HWY_MAX_BYTES/4` 尺寸。结论修正:M1b 宽度泛化
+循环上限全部按 `Lanes()` 参数化,固定 64B/16-lane 下行为正确,
+但更宽目标会静默栈溢出。已统一改为 `HWY_MAX_BYTES` /
+`HWY_MAX_BYTES/4` 尺寸。**勘误**:`HWY_MAX_BYTES` 并非全局 64,
+而是**按 TU 编译目标定义**(NEON/SSE2=16、AVX2=32、AVX3=64、
+SVE=256、RVV=65536,见 set_macros-inl.h)——foreach_target 的每个
+目标副本各自取值,修改后每个副本的 scratch 按自身宽度精确尺寸。
+**性能上无收益**(噪声级):FillSrcBytes/LoadU 只触碰 vl 字节,
+`[64]` 时代未触碰部分与热数据同 cacheline,无额外内存流量;
+真正的宽度收益仍在 dispatch 启用 AVX2/512(独立 TU,M4)。结论修正:M1b 宽度泛化
 记录中"钉死宽度的只有 tag/表/定长数组"的最后一项至此消除;
 `LowerHalf/UpperHalf+PromoteTo/Combine` 的 half 拆分是 u8→u16 展开
 的结构性形态(非 128-bit 假设),`BroadcastLaneByte` 依赖的是
