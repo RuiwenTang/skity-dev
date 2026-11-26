@@ -797,6 +797,18 @@ std::unique_ptr<SWSpanBrush> SWCanvas::GenerateBrush(
       }
     }
 
+    // A non-zero interpolation flag premultiplies the resolved stops before
+    // interpolation (the GPU uploads premultiplied stops for that flag);
+    // the brushes then skip the trailing premultiply so both domains land
+    // on canonical premul outputs.
+    if (info.gradientFlags != 0) {
+      for (auto& stop : info.colors) {
+        stop.r *= stop.a;
+        stop.g *= stop.a;
+        stop.b *= stop.a;
+      }
+    }
+
     if (type == Shader::kLinear || type == Shader::kRadial ||
         type == Shader::kConical || type == Shader::kSweep) {
       Color4f fallback_color;

@@ -5,6 +5,7 @@
 #ifndef SRC_RENDER_SW_SW_SPAN_BRUSH_HPP
 #define SRC_RENDER_SW_SW_SPAN_BRUSH_HPP
 
+#include <algorithm>
 #include <array>
 #include <skity/effect/shader.hpp>
 #include <skity/geometry/matrix.hpp>
@@ -112,6 +113,24 @@ class GradientColorBrush : public SWSpanBrush {
   Color CalculateColor(int32_t x, int32_t y) override;
 
   Color4f LerpColor(float current);
+
+  // Quantizes the interpolated stop color. A non-zero interpolation flag
+  // means GenerateBrush already premultiplied the stop table, so the
+  // interpolated value is premultiplied already: clamp RGB into [0, A]
+  // (the shader's output clamp, which also folds out-of-gamut resolved
+  // stops back into the canonical premul range) and quantize. The default
+  // domain quantizes first and runs the trailing rounding premul.
+  Color FinalizeColor4f(const Color4f& color) const {
+    if (info_.gradientFlags == 0) {
+      return ColorToPMColor(Color4fToColor(color));
+    }
+    Color4f c = color;
+    c.r = std::clamp(c.r, 0.f, c.a);
+    c.g = std::clamp(c.g, 0.f, c.a);
+    c.b = std::clamp(c.b, 0.f, c.a);
+    c.a = std::clamp(c.a, 0.f, 1.f);
+    return Color4fToColor(c);
+  }
 
   Shader::GradientInfo info_ = {};
   Shader::GradientType type_ = {};

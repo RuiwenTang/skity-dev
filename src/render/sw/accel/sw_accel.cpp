@@ -334,8 +334,14 @@ uint32_t ReferenceGradientColor(const GradientParams& p, float t) {
   };
   uint32_t ch[4] = {to_u8(rgba[0]), to_u8(rgba[1]), to_u8(rgba[2]),
                     to_u8(rgba[3])};
-  // ColorToPMColor: rounding premul against the alpha channel.
-  if (ch[3] != 255) {
+  if (p.premul_stops) {
+    // Premultiplied stop domain: the shader clamps RGB into [0, A] at the
+    // output, folding out-of-gamut resolved stops back into range.
+    for (int c = 0; c < 3; c++) {
+      ch[c] = std::min(ch[c], ch[3]);
+    }
+  } else if (ch[3] != 255) {
+    // ColorToPMColor: rounding premul against the alpha channel.
     for (int c = 0; c < 3; c++) {
       ch[c] = MulDiv255Round(ch[c], ch[3]);
     }
@@ -948,6 +954,7 @@ struct GradientLUTCacheSlot {
   // Identity of the stop table the LUT was built from.
   int32_t tile_mode = -1;
   bool use_offsets = false;
+  bool premul_stops = false;
   float first_offset = 0.f;
   int32_t color_count = 0;
   std::vector<float> seg_start;
@@ -971,6 +978,7 @@ uint64_t StopTableHash(const GradientParams& p) {
   };
   mix(&p.tile_mode, sizeof(p.tile_mode));
   mix(&p.use_offsets, sizeof(p.use_offsets));
+  mix(&p.premul_stops, sizeof(p.premul_stops));
   mix(&p.first_offset, sizeof(p.first_offset));
   mix(&p.color_count, sizeof(p.color_count));
   const size_t segs =
@@ -984,6 +992,7 @@ uint64_t StopTableHash(const GradientParams& p) {
 bool StopTableEqual(const GradientLUTCacheSlot& slot, const GradientParams& p) {
   const size_t segs = static_cast<size_t>(p.color_count - 1);
   return slot.tile_mode == p.tile_mode && slot.use_offsets == p.use_offsets &&
+         slot.premul_stops == p.premul_stops &&
          slot.first_offset == p.first_offset &&
          slot.color_count == p.color_count && slot.seg_start.size() == segs &&
          memcmp(slot.seg_start.data(), p.seg_start, segs * sizeof(float)) ==
@@ -1016,6 +1025,7 @@ const uint32_t* AcquireGradientLUT(const GradientParams& params) {
   slot.hash = hash;
   slot.tile_mode = params.tile_mode;
   slot.use_offsets = params.use_offsets;
+  slot.premul_stops = params.premul_stops;
   slot.first_offset = params.first_offset;
   slot.color_count = params.color_count;
   const size_t segs = static_cast<size_t>(params.color_count - 1);

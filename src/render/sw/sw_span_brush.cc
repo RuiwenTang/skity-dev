@@ -291,8 +291,7 @@ class LinearGradientColorBrush : public GradientColorBrush {
 
     Vec2 src{x + 0.5f, y + 0.5f};
     Color4f c = LerpColor(MapPoint(src, points_to_unit_).x);
-    Color color = Color4fToColor(c);
-    color = ColorToPMColor(color);
+    Color color = FinalizeColor4f(c);
     return color;
   }
 
@@ -325,8 +324,7 @@ class SweepGradientColorBrush : public GradientColorBrush {
     constexpr static float k1Over2Pi = 0.1591549430918;
     float t = (angle * k1Over2Pi + 0.5 + bias) * scale;
     Color4f c = LerpColor(t);
-    Color color = Color4fToColor(c);
-    color = ColorToPMColor(color);
+    Color color = FinalizeColor4f(c);
     return color;
   }
 
@@ -350,8 +348,7 @@ class RadialGradientColorBrush : public GradientColorBrush {
 
     Vec2 src{x + 0.5f, y + 0.5f};
     Color4f c = LerpColor(MapPoint(src, points_to_unit_).Length());
-    Color color = Color4fToColor(c);
-    color = ColorToPMColor(color);
+    Color color = FinalizeColor4f(c);
     return color;
   }
 
@@ -376,8 +373,7 @@ class ConicalGradientColorBrush : public GradientColorBrush {
     SKITY_TRACE_EVENT(ConicalGradientColorBrush_CalculateColor);
 
     Color4f c = CalculateConical(x, y);
-    Color color = Color4fToColor(c);
-    color = ColorToPMColor(color);
+    Color color = FinalizeColor4f(c);
     return color;
   }
 
@@ -593,6 +589,7 @@ class AcceleratedGradientColorBrush : public GradientColorBrush {
     }
     params_.tile_mode = static_cast<int32_t>(info_.tile_mode);
     params_.use_offsets = !offsets.empty();
+    params_.premul_stops = info_.gradientFlags != 0;
     if (params_.use_offsets) {
       params_.first_offset = offsets.front();
     }

@@ -101,6 +101,10 @@ struct GradientParams {
   // Stop table consumed by BuildGradientLUT (the kernels only read the LUT).
   bool use_offsets;  // explicit offsets present (legacy early-out applies)
   float first_offset;
+  // True when the stop table is already premultiplied (the non-zero
+  // interpolation flag): interpolation stays in that domain and the
+  // trailing rounding premul is skipped.
+  bool premul_stops;
   // color_count >= 2 stops; colors is color_count * 4 floats (r, g, b, a).
   int32_t color_count;
   const float* seg_start;  // color_count - 1 entries
