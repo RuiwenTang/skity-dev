@@ -851,6 +851,11 @@ void SWCanvas::HandleFilter(Path const& path, Paint const& paint) {
 
   Bitmap bitmap(filter_bounds.Width(), filter_bounds.Height(),
                 AlphaType::kPremul_AlphaType);
+  // The filter layer lives in the target canvas' color space so filters
+  // that resolve declared colors (drop shadow) land in the right space.
+  bitmap.GetPixmap()->SetColorInfo(AlphaType::kPremul_AlphaType,
+                                   ColorType::kRGBA,
+                                   bitmap_->GetPixmap()->GetColorSpace());
 
   auto temp_canvas = Canvas::MakeSoftwareCanvas(&bitmap);
   temp_canvas->Translate(-filter_bounds.Left(), -filter_bounds.Top());
@@ -884,6 +889,9 @@ void SWCanvas::HandleFilter(uint32_t count, const GlyphID* glyphs,
 
   Bitmap bitmap(filter_bounds.Width(), filter_bounds.Height(),
                 AlphaType::kPremul_AlphaType);
+  bitmap.GetPixmap()->SetColorInfo(AlphaType::kPremul_AlphaType,
+                                   ColorType::kRGBA,
+                                   bitmap_->GetPixmap()->GetColorSpace());
 
   auto temp_canvas = Canvas::MakeSoftwareCanvas(&bitmap);
   temp_canvas->Translate(-filter_bounds.Left(), -filter_bounds.Top());

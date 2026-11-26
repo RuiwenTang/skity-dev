@@ -24,6 +24,7 @@
 #include <cstring>
 
 #include "src/graphic/color_priv.hpp"
+#include "src/graphic/color_transform.hpp"
 #include "src/render/sw/sw_stack_blur.hpp"
 #endif
 
@@ -265,21 +266,34 @@ void BlurImageFilter::FlattenToBuffer(WriteBuffer& buffer) const {
 void DropShadowImageFilter::OnFilter(Canvas* canvas, Bitmap& bitmap,
                                      const Rect& filter_bounds,
                                      const Paint& paint) const {
-  Bitmap filtered_bitmap(bitmap.Width(), bitmap.Height());
+  Bitmap filtered_bitmap(bitmap.Width(), bitmap.Height(),
+                         AlphaType::kPremul_AlphaType);
+  // The tinted mask carries the layer's space; without the tag the blit
+  // back to the target would re-interpret (and re-convert) the pixels.
+  filtered_bitmap.GetPixmap()->SetColorInfo(
+      AlphaType::kPremul_AlphaType, ColorType::kRGBA,
+      bitmap.GetPixmap()->GetColorSpace());
   SWStackBlur(&bitmap, &filtered_bitmap,
               std::round(std::max(radius_x_, radius_y_)))
       .Blur();
 
-  // The software path still tints the shadow with the recorded bytes as
-  // sRGB (the color space aware CPU filter path lands with the software
-  // renderer rework); quantizing up front keeps that interpretation
-  // explicit.
-  const Color srgb_color = Color4fToColor(color_);
+  // Resolve the declared shadow color into the layer's space exactly like
+  // the image decode path (BitmapSampler::GetColor): transform in the
+  // unpremultiplied domain, quantize (which also clamps out-of-gamut
+  // channels), then premultiply - and finally scale by the mask coverage
+  // so a semi-transparent declared color survives the tint.
+  Color4f resolved = color_;
+  auto steps = ColorTransformSteps::Resolve(
+      color_space_, bitmap.GetPixmap()->GetColorSpace());
+  if (!steps.IsNoop()) {
+    resolved = steps.Apply(resolved);
+  }
+  const Color shadow_color = ColorToPMColor(Color4fToColor(resolved));
 
   for (size_t y = 0; y < bitmap.Height(); ++y) {
     for (size_t x = 0; x < bitmap.Width(); ++x) {
       auto a = ColorGetA(filtered_bitmap.GetPixel(x, y));
-      auto c = a > 0 ? ColorSetA(srgb_color, a) : Color_TRANSPARENT;
+      auto c = a > 0 ? AlphaMulQ(shadow_color, a) : Color_TRANSPARENT;
       filtered_bitmap.SetPixel(x, y, c);
     }
   }
