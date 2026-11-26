@@ -746,6 +746,25 @@ ImageFilterGolden 的 Matrix/Compose 系列第 3 层失败的候选根因之一)
 另:stack blur mask 内部覆盖 ~254(非精确 255),是 `EXPECT_EQ(direct,
 Color_RED)` 类精确断言在软件下的固有 1 值差来源。
 
+**第 0 层收尾(2026-11-26,9/9 处置完)**:修复 5(DropShadow×2、
+`P3TargetSaveLayerComposite`——`LayerState::Init` 的 layer bitmap 补
+SetColorInfo(画布空间),commit ba1d422e、`DeclaredBlendFilterColor
+ResolvesIntoTarget`——`GenerateBrush` 入口把 declared Blend filter 颜色
+resolve 进 target(`ResolveColorFilterForTarget`,镜像 GPU uniform 解析);
+**生命周期教训**:resolved filter 曾放局部 shared_ptr,brush 持裸指针,
+GenerateBrush 返回后 use-after-free(单跑侥幸过、全量崩)——brush 持裸
+指针的约定要求任何替换 filter 的生命周期挂在 canvas 成员上、
+`NearSingularDrawPaintPreservesShaderCoordinates`——渐变末端 ±1 lsb,
+software 下放宽 ±1(GPU 保持精确));skip 2(RoundTrip、
+`FailedSaveLayerPreservesMatrix`——后者确认 **SaveLayer + image filter
+的 layer 内容在软件下整体丢失**(MatrixImageFilter::OnFilter 空实现),
+是第 3 层 SaveLayer/ImageFilter 族失败的共同根因,嵌套 filter CPU 执行
+是它们的统一解);基线类 2(StrokeDepthOverlap、FilledRRect45Degree
+AAEdges + TextureCopyPreservesTransformedLayerContents,均 use_backend
+specific 缺 `_sw`,归第 1 层批量)。全量 310 case 终态:
+**108 过 / 64 败 / 138 跳**,色彩空间管线(Layer 空间/filter 声明色/
+阴影声明色)在软件上与 GPU 语义对齐。
+
 **方法论(本轮教训)**:stdout 的 `GOLDEN_TEST_FAILED_METRICS` 解析必须
 按"**最后一个** `test name:` 行"归属——正则 `test name:.*?METRICS` 的
 非贪婪跨测试串位曾误报 8 个"全量失败/单独通过"的假阳性,引出一次
