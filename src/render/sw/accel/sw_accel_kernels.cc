@@ -165,7 +165,7 @@ static void SolidRunCoeffKernel(uint8_t* HWY_RESTRICT dst, size_t count,
       SRC == ScaleKind::kInvDstA || SRC == ScaleKind::kDstA ||
       DST == ScaleKind::kInvDstA || DST == ScaleKind::kDstA;
 
-  alignas(64) uint8_t src_bytes[64];
+  alignas(HWY_MAX_BYTES) uint8_t src_bytes[HWY_MAX_BYTES];
 
   const hn::ScalableTag<uint8_t> d8;
   const hn::Half<decltype(d8)> d8h;
@@ -281,7 +281,7 @@ void SolidRunXorKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 // kPlus: r = min(s + d, 255) per channel (saturating add).
 void SolidRunPlusKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                         uint32_t src_pm) {
-  alignas(64) uint8_t src_bytes[64];
+  alignas(HWY_MAX_BYTES) uint8_t src_bytes[HWY_MAX_BYTES];
 
   const hn::ScalableTag<uint8_t> d8;
   const hn::Half<decltype(d8)> d8h;
@@ -316,7 +316,7 @@ void SolidRunPlusKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 // kModulate: r = s * d per channel (MulDiv255Round rounding product).
 void SolidRunModulateKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                             uint32_t src_pm) {
-  alignas(64) uint8_t src_bytes[64];
+  alignas(HWY_MAX_BYTES) uint8_t src_bytes[HWY_MAX_BYTES];
 
   const hn::ScalableTag<uint8_t> d8;
   const hn::Half<decltype(d8)> d8h;
@@ -350,7 +350,7 @@ void SolidRunModulateKernel(uint8_t* HWY_RESTRICT dst, size_t count,
 // kScreen: r = s + d - s * d per channel (rounding product, like PMColorMul).
 void SolidRunScreenKernel(uint8_t* HWY_RESTRICT dst, size_t count,
                           uint32_t src_pm) {
-  alignas(64) uint8_t src_bytes[64];
+  alignas(HWY_MAX_BYTES) uint8_t src_bytes[HWY_MAX_BYTES];
 
   const hn::ScalableTag<uint8_t> d8;
   const hn::Half<decltype(d8)> d8h;
@@ -506,7 +506,7 @@ static void AdvancedRunKernelT(uint8_t* HWY_RESTRICT dst, size_t count,
   const size_t vl = hn::Lanes(d8);
   const size_t sub = hn::Lanes(df8);  // f32 lanes per sub-chunk
 
-  alignas(64) uint8_t src_bytes[64];
+  alignas(HWY_MAX_BYTES) uint8_t src_bytes[HWY_MAX_BYTES];
   FillSrcBytes(src_bytes, src_pm, vl / 4);
 
   const auto k255f = hn::Set(df32, 255.0f);
@@ -674,7 +674,7 @@ static inline void VariableSrcOverStore(V8 s8, uint8_t* HWY_RESTRICT dst,
   const auto scale_hi =
       hn::Sub(k256, hn::PromoteTo(d16, hn::UpperHalf(d8h, sa8)));
 
-  alignas(64) uint8_t dst_buf[64];
+  alignas(HWY_MAX_BYTES) uint8_t dst_buf[HWY_MAX_BYTES];
   if (rem < group) {
     memcpy(dst_buf, dst, rem * 4);
     memset(dst_buf + rem * 4, 0, vl - rem * 4);
@@ -793,11 +793,11 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
     // error below 1 instead of letting it accumulate with the grid error.
     const auto frac8 = hn::Min(
         hn::ConvertTo(u32, hn::Add(hn::Mul(frac_f, k256f), kHalf)), k255u);
-    alignas(64) uint32_t i0a[16];
+    alignas(HWY_MAX_BYTES) uint32_t i0a[HWY_MAX_BYTES / 4];
     hn::Store(i0, u32, i0a);
 
-    alignas(64) uint32_t c0a[16];
-    alignas(64) uint32_t c1a[16];
+    alignas(HWY_MAX_BYTES) uint32_t c0a[HWY_MAX_BYTES / 4];
+    alignas(HWY_MAX_BYTES) uint32_t c1a[HWY_MAX_BYTES / 4];
     for (size_t j = 0; j < vl / 4; j++) {
       const uint32_t k = i0a[j];
       c0a[j] = p.lut[k];
@@ -847,7 +847,7 @@ static void GradientRunKernelT(uint8_t* HWY_RESTRICT dst,
       }
     } else {
       // ---- variable-src SrcOver: d + (d * (256 - sa)) >> 8 -------------
-      alignas(64) uint32_t words[16];
+      alignas(HWY_MAX_BYTES) uint32_t words[HWY_MAX_BYTES / 4];
       hn::Store(word, u32, words);
       VariableSrcOverStore(
           hn::LoadU(d8, reinterpret_cast<const uint8_t*>(words)), dst + px * 4,
@@ -1328,7 +1328,7 @@ static void ImageRunKernelT(uint8_t* HWY_RESTRICT dst, const ImageParams* ip,
     v = RemapTileLanes(v, p.y_tile_mode);
 
     // ---- fetch ---------------------------------------------------------
-    alignas(64) uint32_t words[16];
+    alignas(HWY_MAX_BYTES) uint32_t words[HWY_MAX_BYTES / 4];
     if constexpr (!kLinear) {
       // Nearest: the scalar sampler truncates the scaled coordinate into
       // uint32 (glm::clamp<uint32_t> on a non-negative value) and clamps to
@@ -1339,7 +1339,7 @@ static void ImageRunKernelT(uint8_t* HWY_RESTRICT dst, const ImageParams* ip,
           hn::Max(hn::ConvertTo(i32, hn::Mul(v, tex_h)), i_zero), h_last);
       const auto off = hn::Add(hn::Mul(hn::BitCast(u32, iy), row_bytes),
                                hn::Mul(hn::BitCast(u32, ix), k4));
-      alignas(64) uint32_t offs[16];
+      alignas(HWY_MAX_BYTES) uint32_t offs[HWY_MAX_BYTES / 4];
       hn::Store(off, u32, offs);
       for (size_t j = 0; j < group; j++) {
         words[j] = LoadTexelWord(texels + offs[j]);
@@ -1383,23 +1383,23 @@ static void ImageRunKernelT(uint8_t* HWY_RESTRICT dst, const ImageParams* ip,
       const auto ox1 = hn::Mul(hn::BitCast(u32, i1), k4);
       const auto oy0 = hn::Mul(hn::BitCast(u32, j0), row_bytes);
       const auto oy1 = hn::Mul(hn::BitCast(u32, j1), row_bytes);
-      alignas(64) uint32_t offs00[16];
-      alignas(64) uint32_t offs10[16];
-      alignas(64) uint32_t offs01[16];
-      alignas(64) uint32_t offs11[16];
+      alignas(HWY_MAX_BYTES) uint32_t offs00[HWY_MAX_BYTES / 4];
+      alignas(HWY_MAX_BYTES) uint32_t offs10[HWY_MAX_BYTES / 4];
+      alignas(HWY_MAX_BYTES) uint32_t offs01[HWY_MAX_BYTES / 4];
+      alignas(HWY_MAX_BYTES) uint32_t offs11[HWY_MAX_BYTES / 4];
       hn::Store(hn::Add(oy0, ox0), u32, offs00);
       hn::Store(hn::Add(oy0, ox1), u32, offs10);
       hn::Store(hn::Add(oy1, ox0), u32, offs01);
       hn::Store(hn::Add(oy1, ox1), u32, offs11);
-      alignas(64) float aa[16];
-      alignas(64) float bb[16];
+      alignas(HWY_MAX_BYTES) float aa[HWY_MAX_BYTES / 4];
+      alignas(HWY_MAX_BYTES) float bb[HWY_MAX_BYTES / 4];
       hn::Store(a, f32, aa);
       hn::Store(b, f32, bb);
 
-      alignas(64) uint32_t t00[16];
-      alignas(64) uint32_t t10[16];
-      alignas(64) uint32_t t01[16];
-      alignas(64) uint32_t t11[16];
+      alignas(HWY_MAX_BYTES) uint32_t t00[HWY_MAX_BYTES / 4];
+      alignas(HWY_MAX_BYTES) uint32_t t10[HWY_MAX_BYTES / 4];
+      alignas(HWY_MAX_BYTES) uint32_t t01[HWY_MAX_BYTES / 4];
+      alignas(HWY_MAX_BYTES) uint32_t t11[HWY_MAX_BYTES / 4];
       for (size_t j = 0; j < group; j++) {
         t00[j] = LoadTexelWord(texels + offs00[j]);
         t10[j] = LoadTexelWord(texels + offs10[j]);
@@ -1535,7 +1535,7 @@ static void MaskRunKernelT(uint8_t* HWY_RESTRICT dst_row,
   const size_t vl = hn::Lanes(d8);
   const size_t group = vl / 4;
 
-  alignas(64) uint8_t color_bytes[64];
+  alignas(HWY_MAX_BYTES) uint8_t color_bytes[HWY_MAX_BYTES];
   FillSrcBytes(color_bytes, src_pm, group);
   const auto color8 = hn::LoadU(d8, color_bytes);
   const auto color_lo = hn::PromoteTo(d16, hn::LowerHalf(d8h, color8));
@@ -1546,7 +1546,7 @@ static void MaskRunKernelT(uint8_t* HWY_RESTRICT dst_row,
   size_t px = 0;
   for (; px + group <= count; px += group) {
     // The table vector: `group` mask bytes at its start, indexed by lane/4.
-    alignas(64) uint8_t mask_buf[64];
+    alignas(HWY_MAX_BYTES) uint8_t mask_buf[HWY_MAX_BYTES];
     hn::StoreU(hn::LoadU(df8, mask_row + px), df8, mask_buf);
     const auto mask8 = hn::TableLookupBytes(hn::LoadU(d8, mask_buf),
                                             hn::ShiftRight<2>(hn::Iota(d8, 0)));
