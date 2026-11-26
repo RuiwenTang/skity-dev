@@ -808,6 +808,27 @@ Coordinates(陡峭渐变区的亚像素采样相位,紧邻列 RGB 交错)录 `_s
 allowlist 84 → **88**;全量 **139 过 / 24 败 / 147 跳**。渐变族仅剩
 `FallbackPathAndRRect`(4×4 fallback 面板,row0 白 vs 蓝白的整块差,
 退化渐变 fallback 色选择与 GPU 的语义分歧,待深挖)。
+
+**M3-1c 第三批 + 收官(2026-11-26,全量 0 失败)**:
+- 21 个边缘带/舍入族录 `_sw`:ClipRect/ClipPath(乘法软 clip 边缘带)、
+  CatHeadPath/DrawCheck×2/StrokeJoinAndCap/PathTransformFillType、
+  变换 rrect 描边 ×4、SaveLayer 小场景 ×4(TwoCircle/ThreeCircle/
+  PerspectiveZ0Plane/SaveLayerIsolation)、Gamma×2(圆 AA 边缘经 transfer
+  曲线非线性放大——case 注释自证"rasterization noise covered by shape
+  goldens")、DisplayP3AndLinearSRGBDecode(全差 ≤2 超数量门槛)、
+  CullRectClipPathTransform、Tiger(5.6 万 px **全部 ≤2.5/255**——大图
+  AA 边缘累积)、DrawYinAndYang(细弧线边缘);
+- `CoverageAwareBlendModes` skip(全部段都是 coverage-AA/contour/simple
+  GPU 管线基线,无共享段)、`TwoCircleWithTranslate` skip(layer 经
+  MatrixTransform image filter 合成,嵌套 filter 族);
+- `FallbackPathAndRRect` 收官:premul 修复后两图 4×4 面板**结构完全
+  一致**(fallback 色/alpha 折叠/kSrc 全对),4.4 万 px 全部 ≤2.5/255
+  = 平均色量化链的舍入差,`_sw` 承载。**教训:大 diff_pixel_count +
+  低 max_diff_percent(≤1%)组合 = 全图舍入/边缘族**,先看 max 再惊慌;
+- **终态:全量 161 过 / 0 败 / 149 跳,allowlist 110/110 全绿,
+  golden-text 2/2**。M3-1 全部完成。剩余 149 skip = GPU 管线专属
+  (coverage-AA/texture-copy/stencil overlap 等,已登记)+ 嵌套 filter
+  族(6 case,等 CPU 嵌套执行)。
 另:stack blur mask 内部覆盖 ~254(非精确 255),是 `EXPECT_EQ(direct,
 Color_RED)` 类精确断言在软件下的固有 1 值差来源。
 
