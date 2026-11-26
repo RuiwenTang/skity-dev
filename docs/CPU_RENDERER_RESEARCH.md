@@ -768,6 +768,24 @@ ImageFilterGolden 的 Matrix/Compose 系列第 3 层失败的候选根因之一)
   剩余 38 = 第 2/3 层(Blur 族 5、渐变 flags 族 3、ClipPath/ClipRect、
   CoverageAware、Tiger、SaveLayer 大场景等)+ 嵌套 filter 族
   (ImageFilter Matrix/Compose 3 个)。
+
+**M3-1c 第一批(Blur 族,2026-11-26)**:7 个 blur case(Blur×5、
+DropShadow_0_0_10_10、ScaledBlurMaskFilter)录 `_sw`。归因:
+`BlurBitmapToCanvas`/`DropShadowImageFilter` 都走
+`SWStackBlur(round(max(rx,ry)))`——**各向异性半径折叠成对称方核**
+(stack blur 的已知简化),vs GPU 可分离精确核,差异 = 晕区的核形状
+分布(max 通道差 ~40/255,16% 像素)。非正确性缺口;**两半径可分离
+stack blur 扩展**登记为后续可选优化(对齐 GPU 更近)。嵌套 filter
+三 case(Matrix_translate/RotateMatrix/ComposeBlurMatrix)随 RoundTrip/
+FailedSaveLayer 一起 skip,等 CPU 嵌套执行落地。allowlist 77 → **84**;
+全量 **135 过 / 28 败 / 147 跳**。剩余 28 待归因:渐变 flags 族 3
+(RadialGradientFlags 3 万 px/25%——疑似色彩空间插值真差距,优先)、
+SaveLayer 大 diff 族 3(TwoCircleWithTranslate 3.2 万/PerspectiveZ0Plane/
+ThreeCircle)、Shape 中量级 5(CatHeadPath/DrawCheck×2/StrokeJoinAndCap/
+PathTransformFillType)、SimpleShape 残余 5(rrect 变换描边 + Coverage
+Aware + YinAndYang)、ClipRect/ClipPath、Gamma ColorFilter×2(457px,
+疑似 8bit 表量化 vs GPU 浮点)、DisplayP3AndLinearSRGBDecode、
+CullRectClipPathTransform、Tiger。
 另:stack blur mask 内部覆盖 ~254(非精确 255),是 `EXPECT_EQ(direct,
 Color_RED)` 类精确断言在软件下的固有 1 值差来源。
 
