@@ -720,15 +720,31 @@ shape 二进制全部 310 case 在 software 后端跑通,归因分类后按类�
    渐变两个疑似色彩空间插值路径差距(与第 0 层 ColorSpace 断言失败
    同族),blur 系列大概率登记实现差异 + `_sw`。
 
-**第 0 层首查线索(DropShadow,2026-11-26)**:
-`DeclaredShadowMatchesImageOnSRGBTarget` 的 R=255 vs 128 定位到
-`DropShadowImageFilter::OnFilter`(`image_filter.cc:273`)——注释自认
-"software path 仍把 declared bytes 当 sRGB,color-space aware CPU filter
-path 随软绘重构落地"。且断言的 expected 128 恰为 P3 空间内 premul 值,
-说明**参考的 image decode 路径在软件上同样丢了 P3→sRGB 转换**——两条
-路径丢法不同(shadow 丢 alpha/premul、decode 丢目标空间转换),修复须
-两条一起对齐 GPU 语义(declared space → unpremul 转目标空间 → premul),
-预期与第 3 层渐变两 case、Blur 系列的色彩半差同根。
+**第 0 层首查线索(DropShadow,2026-11-26,已修复)**:
+`DeclaredShadowMatchesImageOnSRGBTarget` 定位到
+`DropShadowImageFilter::OnFilter` 三连缺陷:①declared `Color4f` 直接
+线性量化当 sRGB(丢空间转换);②`ColorSetA(srgb_color, mask_a)` 用 mask
+覆盖度**替换** alpha,declared 半透明 alpha 丢失;③tint 后的
+`filtered_bitmap` 默认 premul/sRGB 声明,回读 blit 再 premul 一次、宽色域
+target 上再转换一次。修复(commit ad09b35c):tint 走
+`ColorTransformSteps::Resolve(declared, layer空间).Apply` →
+`Color4fToColor` → `ColorToPMColor`(与 `BitmapSampler::GetColor` 的 image
+decode 链逐位同构)→ `AlphaMulQ(shadow_color, mask_a)`;`HandleFilter`
+的 temp layer(sRGB glyph 版两处)补 `SetColorInfo(画布空间)`。
+`DeclaredShadowMatchesImageOnSRGBTarget` / `LegacyShadowRidesIntoP3Target`
+转绿。**排查过程的方法论教训**:(a) 探针中途一度把正确的 encoded 值
+(0.9175,0.2002,0.1385 = sRGB red 的 P3 表示)误当 linear 值,推出
+"encode 步失效"的假说——数值归因必须先算准一个已知正确值再对比;
+(b) `ColorTransformSteps`/`InvertTransferFn`/`EvalTransferFn` 全链验证
+无误,真正的 bug 全在调用方(drop shadow 自己),共享层没有问题。
+**新登记缺口**:`RoundTripPreservesDeclaredShadowOnP3Target` 的 wire 形态
+是 `Matrix > ColorFilter(Blend) > Blur` 嵌套组合,软件渲染器只实现了
+Blur/DropShadow 叶子,`MatrixImageFilter`/`ColorFilterImageFilter` 无 CPU
+`OnFilter`(基类空实现)→ 嵌套回放 no-op,case 已加 software skip;
+**嵌套 image filter 的 CPU 组合执行**列为 M3-1a 后续工作(也是
+ImageFilterGolden 的 Matrix/Compose 系列第 3 层失败的候选根因之一)。
+另:stack blur mask 内部覆盖 ~254(非精确 255),是 `EXPECT_EQ(direct,
+Color_RED)` 类精确断言在软件下的固有 1 值差来源。
 
 **方法论(本轮教训)**:stdout 的 `GOLDEN_TEST_FAILED_METRICS` 解析必须
 按"**最后一个** `test name:` 行"归属——正则 `test name:.*?METRICS` 的
