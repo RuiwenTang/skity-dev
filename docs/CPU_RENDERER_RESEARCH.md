@@ -563,6 +563,19 @@ Skia CPU 的语义(CPU 渲染器全程 AA 哲学的延伸),`_sw` 每后端基线
 意义就是承载它。重录 `_sw` 基线;**跨后端在裁剪 AA 边缘的分歧(软 vs 硬)
 登记为已知语义差异**,M3 交叉容差验收时按边缘带豁免或对齐 GPU。
 
+> **勘误(2026-11-26,main 同步后)**:上文 ClipPathDifference 的归因
+> 大部分是错的。真实根因是 `SWCanvas::PushClip` 的 leading kDifference
+> 分支把 `DifferenceClip` 参数写反(`diff − 全屏 = 空`),差分裁剪后的
+> 蓝色填充**整个消失**(33590 像素差 ≠ "软边语义"),当时误当作软边差异
+> 重录 `_sw` 基线、掩盖了 bug。修正参数序后 vs GPU 共享基线仅差 3322
+> 像素(2.1%)——这才是软/硬边语义差异的真实量级,M2-0"重做时一并
+> 消除"的方向判断其实大体正确。`_sw` 基线已按正确行为重录,并补 canvas
+> 级回归单测 `SWCanvas.LeadingDifferenceClipSubtractsFromWholeSurface`
+> (既有 `SWRasterClip.LeadingDifferenceFramesTheSurface` 只测了
+> `DifferenceClip` 函数本身的参数序,没测 PushClip 接线,故未拦截)。
+> 教训:**重录基线前必须先解释每一处差异的机制来源**;量级突变(21→
+> 33590)不可能由"边缘近似方式变化"解释。
+
 **顺带退役**:PerformMerge(TODO "not correct")、FindSpan(第三分支 `+1`
 off-by-one)、spans_subtraction、RecursiveClip 的 op 匹配逻辑、每次填充的
 span 求交。OnDrawPaint 统一走 DoBrush。
@@ -625,6 +638,36 @@ bilinear 上做过一次,成本收益不成立)。
 删每 span 堆分配);加速臂锚点全部维持——全场景 1015μs(M2-3:
 1009)、逐次绘制 ~820 ns/draw(805)、文字 7.21μs(7.29)。
 单测 15/15 SWAccel 全绿;Debug 32/32(渲染四套件)。
+
+### main 同步记录(2026-11-26,M3-0 前置)
+
+远端 main 在 M2 收尾期间并行补了一批**旧软绘修复 + 软件 golden 扩容**
+(f5103227..67c9ff66,#603-#609),已 merge 进本分支。对 M3 规划的影响:
+
+- **main 已占位 M3-1/M3-3 的一部分**:`kSoftwareGoldenFilter` 扩到 ~34
+  case(新增 BlendMode.Screen、11 个 ColorSpace、gradient fallback×2、
+  Image linear/nearest-colorfilter、RetainedFrames、CullRectClipDrawPaint),
+  CI 新增 `osx_software_golden_test` job(shape + ft text,再切 CT text)。
+  M3 的清单扩容改为**与 main 协同**:剩余大头是 blend_mode 其余 27 模式、
+  save_layer/image_filter 组、skp;
+- **main 的修复是针对旧软绘的**,逐个与本分支重写的对应关系:#603
+  (DrawPaint 尊重 device clip bounds)分支已有等价实现;#604(color
+  filter 组合顺序)共享代码直接生效;#605(NEON screen 饱和)分支已删
+  NEON,标量+内核输出与 main 修复后 `_sw` 基线吻合(Screen golden 绿);
+  #606(bilinear 坐标 clamp,负浮点转 u32 UB)共享 sampler 生效,分支
+  SIMD 内核的 i32 域 clamp 语义本就与修复后一致;#607(CI)/#609(nearest
+  采样保留 color processing + software golden surface 标注 target color
+  space)的 sw_span_brush NEON 部分整体过时(分支已删),golden env 的
+  color space 标注合并生效;#608(退化梯度解析为 tile color)自动合并进
+  分支 GenerateBrush(stop 空间转换之后,语义正确);
+- **同步暴露并修复一个 M2-3 真 bug**(见 M2-3 勘误):`PushClip` leading
+  kDifference 参数反转,`RecorderGolden.DisplayListCullRectClipDrawPaint`
+  (共享 GPU 基线)抓到,`ClipPathDifference` 的 `_sw` 基线按正确行为重录;
+- 同步后验证:软件 golden shape 42/42、text 2/2;unit 1290(1285 通过,
+  2 失败为既有 Arena death test 环境项,3 skip);
+- `ImageGolden.NearestPaintColorFilter` 是**共享 GPU 基线**(无 `_sw`),
+  即软绘直接对 GPU 交叉验收的先例——M3-2 交叉容差设施的第一块拼图
+  已在 main 落地一例(逐 case 手工形态)。
 
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
