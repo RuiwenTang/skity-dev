@@ -220,3 +220,24 @@ TEST(SWCanvas, ScreenKeepsOpaqueDestinationAcrossSpan) {
     EXPECT_EQ(bitmap.GetPixel(x, 0), skity::ColorSetARGB(255, 243, 64, 128));
   }
 }
+
+TEST(SWCanvas, LeadingDifferenceClipSubtractsFromWholeSurface) {
+  // A kDifference as the very first clip op frames the surface: the hole
+  // keeps the destination and everything around it is painted. Regression
+  // test for PushClip wiring the implicit base as the minuend.
+  skity::Bitmap bitmap(16, 16, skity::kPremul_AlphaType);
+  auto canvas = skity::Canvas::MakeSoftwareCanvas(&bitmap);
+  canvas->Clear(skity::Color_RED);
+
+  canvas->Save();
+  canvas->ClipRect(skity::Rect::MakeXYWH(4.f, 4.f, 8.f, 8.f),
+                   skity::Canvas::ClipOp::kDifference);
+  skity::Paint paint;
+  paint.SetColor(skity::Color_GREEN);
+  canvas->DrawPaint(paint);
+  canvas->Restore();
+
+  EXPECT_EQ(bitmap.GetPixel(7, 7), skity::Color_RED);
+  EXPECT_EQ(bitmap.GetPixel(0, 0), skity::Color_GREEN);
+  EXPECT_EQ(bitmap.GetPixel(15, 15), skity::Color_GREEN);
+}

@@ -136,7 +136,7 @@ void SWCanvas::PushClip(RasterClip clip, ClipOp op) {
     // the whole surface (the implicit base of the clip stack).
     if (op == ClipOp::kDifference) {
       clip =
-          DifferenceClip(clip, MakeBoundsClip(Rect::MakeWH(Width(), Height())));
+          DifferenceClip(MakeBoundsClip(Rect::MakeWH(Width(), Height())), clip);
     }
     state_stack_.back().clip =
         std::make_shared<const RasterClip>(std::move(clip));
