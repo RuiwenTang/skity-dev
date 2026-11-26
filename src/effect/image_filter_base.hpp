@@ -56,7 +56,8 @@ class ImageFilterBase : public ImageFilter {
   static void BlurBitmapToCanvas(Canvas* canvas, Bitmap& bitmap,
                                  const Rect& filter_bounds, const Paint& paint,
                                  float radius_x, float radius_y);
-  virtual void OnFilter(Canvas*, Bitmap&, const Rect&, const Paint&) const {}
+  virtual void OnFilter(Canvas*, Bitmap&, const Rect& filter_bounds,
+                        const Rect& content_bounds, const Paint&) const {}
 #endif
   ~ImageFilterBase() override = default;
 
@@ -68,6 +69,10 @@ class ImageFilterBase : public ImageFilter {
   virtual Color GetColor() const { return Color_TRANSPARENT; }
 
   virtual ImageFilterType GetType() const = 0;
+
+  /// Source filters this node consumes (GPU-style input chain); a node
+  /// with an input filters that first, then applies itself.
+  const std::vector<ImageFilter*>& GetInputs() const { return inputs_; }
 
   void FlattenToBuffer(WriteBuffer& buffer) const override;
 
@@ -99,7 +104,7 @@ class BlurImageFilter : public ImageFilterBase {
   float GetRadiusY() const override { return radius_y_; }
 #if defined(SKITY_CPU)
   void OnFilter(Canvas* canvas, Bitmap& bitmap, const Rect& filter_bounds,
-                const Paint& paint) const override;
+                const Rect& content_bounds, const Paint& paint) const override;
 #endif
 
   ImageFilterType GetType() const override { return ImageFilterType::kBlur; }
@@ -143,7 +148,7 @@ class DropShadowImageFilter : public ImageFilterBase {
   }
 #if defined(SKITY_CPU)
   void OnFilter(Canvas* canvas, Bitmap& bitmap, const Rect& filter_bounds,
-                const Paint& paint) const override;
+                const Rect& content_bounds, const Paint& paint) const override;
 #endif
 
   ImageFilterType GetType() const override {
@@ -185,7 +190,7 @@ class MorphologyImageFilter : public ImageFilterBase {
   float GetRadiusY() const override { return radius_y_; }
 #if defined(SKITY_CPU)
   void OnFilter(Canvas* canvas, Bitmap& bitmap, const Rect& filter_bounds,
-                const Paint& paint) const override;
+                const Rect& content_bounds, const Paint& paint) const override;
 #endif
 
   /**
@@ -219,6 +224,11 @@ class MatrixImageFilter : public ImageFilterBase {
 
   const Matrix& GetMatrix() const { return matrix_; }
 
+#if defined(SKITY_CPU)
+  void OnFilter(Canvas* canvas, Bitmap& bitmap, const Rect& filter_bounds,
+                const Rect& content_bounds, const Paint& paint) const override;
+#endif
+
   ImageFilterType GetType() const override { return ImageFilterType::kMatix; }
 
   Rect ComputeFastBounds(const Rect& src) const override {
@@ -249,6 +259,11 @@ class ColorFilterImageFilter : public ImageFilterBase {
 
   std::shared_ptr<ColorFilter> GetColorFilter() const { return color_filter_; }
 
+#if defined(SKITY_CPU)
+  void OnFilter(Canvas* canvas, Bitmap& bitmap, const Rect& filter_bounds,
+                const Rect& content_bounds, const Paint& paint) const override;
+#endif
+
   std::string_view ProcName() const override;
 
   void FlattenToBuffer(WriteBuffer& buffer) const override;
@@ -268,6 +283,11 @@ class ComposeImageFilter : public ImageFilterBase {
   ImageFilterType GetType() const override {
     return ImageFilterType::kCompose;
   };
+
+#if defined(SKITY_CPU)
+  void OnFilter(Canvas* canvas, Bitmap& bitmap, const Rect& filter_bounds,
+                const Rect& content_bounds, const Paint& paint) const override;
+#endif
 
   std::shared_ptr<ImageFilter> GetOuter() const { return outer_; }
 

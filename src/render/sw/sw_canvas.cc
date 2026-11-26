@@ -891,30 +891,35 @@ void SWCanvas::HandleFilter(Path const& path, Paint const& paint) {
   auto image_filter = As_IFB(paint.GetImageFilter().get());
   auto bounds = ComputeBoundsIfStroke(path.GetBounds(), paint);
 
-  float radius_x =
-      mask_filter ? mask_filter->GetBlurRadius() : image_filter->GetRadiusX();
-  float radius_y =
-      mask_filter ? mask_filter->GetBlurRadius() : image_filter->GetRadiusY();
-  auto filter_bounds =
-      ImageFilterBase::ApproximateFilteredBounds(bounds, radius_x, radius_y);
+  Rect filter_bounds;
+  if (mask_filter) {
+    filter_bounds = ImageFilterBase::ApproximateFilteredBounds(
+        bounds, mask_filter->GetBlurRadius(), mask_filter->GetBlurRadius());
+  } else {
+    // The image filter's own fast bounds: a matrix transform or a shadow
+    // offset grows the layer beyond the blur radii.
+    filter_bounds = ImageFilterBase::ApproximateFilteredBounds(
+        image_filter->ComputeFastBounds(bounds), 0, 0);
+  }
 
-  Bitmap bitmap(filter_bounds.Width(), filter_bounds.Height(),
-                AlphaType::kPremul_AlphaType);
-  // The filter layer lives in the target canvas' color space so filters
-  // that resolve declared colors (drop shadow) land in the right space.
+  // The layer covers the unexpanded content rect: filters grow their own
+  // output (blur/drop-shadow pads the halo, matrix maps the rect), and it
+  // lives in the target canvas' color space so filters that resolve
+  // declared colors (drop shadow) land in the right space.
+  Bitmap bitmap(bounds.Width(), bounds.Height(), AlphaType::kPremul_AlphaType);
   bitmap.GetPixmap()->SetColorInfo(AlphaType::kPremul_AlphaType,
                                    ColorType::kRGBA,
                                    bitmap_->GetPixmap()->GetColorSpace());
 
   auto temp_canvas = Canvas::MakeSoftwareCanvas(&bitmap);
-  temp_canvas->Translate(-filter_bounds.Left(), -filter_bounds.Top());
+  temp_canvas->Translate(-bounds.Left(), -bounds.Top());
   temp_canvas->DrawPath(path, work_paint);
 
   if (mask_filter) {
     MaskFilterOnFilter(this, bitmap, filter_bounds, work_paint,
                        mask_filter.get());
   } else {
-    image_filter->OnFilter(this, bitmap, filter_bounds, work_paint);
+    image_filter->OnFilter(this, bitmap, filter_bounds, bounds, work_paint);
   }
 }
 
@@ -929,21 +934,22 @@ void SWCanvas::HandleFilter(uint32_t count, const GlyphID* glyphs,
   auto image_filter = As_IFB(paint.GetImageFilter().get());
   auto bounds = TextBlob::ComputeBounds(count, glyphs, position_x, position_y,
                                         font, paint);
-  auto radius_x =
-      mask_filter ? mask_filter->GetBlurRadius() : image_filter->GetRadiusX();
-  auto radius_y =
-      mask_filter ? mask_filter->GetBlurRadius() : image_filter->GetRadiusY();
-  auto filter_bounds =
-      ImageFilterBase::ApproximateFilteredBounds(bounds, radius_x, radius_y);
+  Rect filter_bounds;
+  if (mask_filter) {
+    filter_bounds = ImageFilterBase::ApproximateFilteredBounds(
+        bounds, mask_filter->GetBlurRadius(), mask_filter->GetBlurRadius());
+  } else {
+    filter_bounds = ImageFilterBase::ApproximateFilteredBounds(
+        image_filter->ComputeFastBounds(bounds), 0, 0);
+  }
 
-  Bitmap bitmap(filter_bounds.Width(), filter_bounds.Height(),
-                AlphaType::kPremul_AlphaType);
+  Bitmap bitmap(bounds.Width(), bounds.Height(), AlphaType::kPremul_AlphaType);
   bitmap.GetPixmap()->SetColorInfo(AlphaType::kPremul_AlphaType,
                                    ColorType::kRGBA,
                                    bitmap_->GetPixmap()->GetColorSpace());
 
   auto temp_canvas = Canvas::MakeSoftwareCanvas(&bitmap);
-  temp_canvas->Translate(-filter_bounds.Left(), -filter_bounds.Top());
+  temp_canvas->Translate(-bounds.Left(), -bounds.Top());
   static_cast<SWCanvas*>(temp_canvas.get())
       ->DrawGlyphsInternal(count, glyphs, position_x, position_y, font,
                            work_paint);
@@ -953,7 +959,7 @@ void SWCanvas::HandleFilter(uint32_t count, const GlyphID* glyphs,
                                         mask_filter->GetBlurRadius(),
                                         mask_filter->GetBlurRadius());
   } else {
-    image_filter->OnFilter(this, bitmap, filter_bounds, work_paint);
+    image_filter->OnFilter(this, bitmap, filter_bounds, bounds, work_paint);
   }
 }
 

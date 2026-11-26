@@ -9,6 +9,7 @@
 // Licensed under the Apache License Version 2.0 that can be found in the
 // LICENSE file in the root directory of this source tree.
 
+#include <skity/effect/color_filter.hpp>
 #include <skity/effect/mask_filter.hpp>
 #include <skity/geometry/matrix.hpp>
 #include <skity/graphic/bitmap.hpp>
@@ -216,6 +217,205 @@ std::shared_ptr<ImageFilter> ImageFilters::LocalMatrix(
 
 #if defined(SKITY_CPU)
 
+namespace {
+
+// CPU execution of one image-filter node over a layer bitmap - the shared
+// recursive core behind the nested filter types (matrix / color filter /
+// compose) and their blur / drop-shadow leaves. `bounds` is the device rect
+// the src pixmap covers; out_bounds returns the device rect the filtered
+// pixmap covers (a matrix transform or a shadow offset grows it). Interior
+// compositing runs with a default paint, mirroring the GPU filter graph
+// where inner nodes produce textures and only the final blit carries the
+// paint's blend and alpha. Bitmaps are move-disabled, so the result travels
+// as its shared Pixmap.
+std::shared_ptr<Pixmap> MakeLayerPixmap(
+    uint32_t width, uint32_t height,
+    const std::shared_ptr<const ColorSpace>& space) {
+  Bitmap bitmap(width, height, AlphaType::kPremul_AlphaType);
+  bitmap.GetPixmap()->SetColorInfo(AlphaType::kPremul_AlphaType,
+                                   ColorType::kRGBA, space);
+  return bitmap.GetPixmap();
+}
+
+std::shared_ptr<Pixmap> ApplyFilterNode(const ImageFilterBase* filter,
+                                        const std::shared_ptr<Pixmap>& src,
+                                        const Rect& bounds, Rect& out_bounds);
+
+std::shared_ptr<Pixmap> ApplyDropShadowNode(const DropShadowImageFilter* filter,
+                                            const std::shared_ptr<Pixmap>& src,
+                                            const Rect& bounds,
+                                            Rect& out_bounds) {
+  Rect shadow_bounds = bounds;
+  shadow_bounds.Offset(filter->GetOffsetX(), filter->GetOffsetY());
+  out_bounds = bounds;
+  out_bounds.Join(shadow_bounds);
+  const float radius =
+      std::round(std::max(filter->GetRadiusX(), filter->GetRadiusY()));
+  // The shadow mask blurs out of a padded layer (SWStackBlur cannot grow
+  // its support); the padded rect also spans the halo in the output.
+  Rect padded =
+      ImageFilterBase::ApproximateFilteredBounds(shadow_bounds, radius, radius);
+  out_bounds.Join(padded);
+  out_bounds = ImageFilterBase::ApproximateFilteredBounds(out_bounds, 0, 0);
+
+  auto dst = MakeLayerPixmap(static_cast<uint32_t>(out_bounds.Width()),
+                             static_cast<uint32_t>(out_bounds.Height()),
+                             src->GetColorSpace());
+  Bitmap dst_bitmap(dst, false);
+
+  auto padded_pm = MakeLayerPixmap(static_cast<uint32_t>(padded.Width()),
+                                   static_cast<uint32_t>(padded.Height()),
+                                   src->GetColorSpace());
+  Bitmap padded_bitmap(padded_pm, false);
+  auto pad_canvas = Canvas::MakeSoftwareCanvas(&padded_bitmap);
+  pad_canvas->Translate(-padded.Left(), -padded.Top());
+  pad_canvas->DrawImage(Image::MakeImage(src), shadow_bounds, nullptr);
+
+  auto shadow = MakeLayerPixmap(padded_bitmap.Width(), padded_bitmap.Height(),
+                                src->GetColorSpace());
+  Bitmap shadow_bitmap(shadow, false);
+  SWStackBlur(&padded_bitmap, &shadow_bitmap, radius).Blur();
+
+  // Tint with the declared color resolved into the layer space (the same
+  // chain as the top-level DropShadowImageFilter::OnFilter).
+  Color4f resolved = filter->GetColor4f();
+  auto steps = ColorTransformSteps::Resolve(filter->GetColorSpace(),
+                                            src->GetColorSpace());
+  if (!steps.IsNoop()) {
+    resolved = steps.Apply(resolved);
+  }
+  const Color shadow_color = ColorToPMColor(Color4fToColor(resolved));
+  for (size_t y = 0; y < shadow_bitmap.Height(); ++y) {
+    for (size_t x = 0; x < shadow_bitmap.Width(); ++x) {
+      auto a = ColorGetA(shadow_bitmap.GetPixel(x, y));
+      shadow_bitmap.SetPixel(
+          x, y, a > 0 ? AlphaMulQ(shadow_color, a) : Color_TRANSPARENT);
+    }
+  }
+
+  auto canvas = Canvas::MakeSoftwareCanvas(&dst_bitmap);
+  canvas->Translate(-out_bounds.Left(), -out_bounds.Top());
+  canvas->DrawImage(Image::MakeImage(shadow), padded, nullptr);
+  canvas->DrawImage(Image::MakeImage(src), bounds, nullptr);
+  return dst;
+}
+
+std::shared_ptr<Pixmap> ApplyFilterNode(const ImageFilterBase* filter,
+                                        const std::shared_ptr<Pixmap>& src,
+                                        const Rect& bounds, Rect& out_bounds) {
+  const auto& space = src->GetColorSpace();
+  // The input chain runs first: a serialized DropShadow nests as
+  // Matrix{ColorFilter{Blur}} through inputs_, not as a Compose tree.
+  auto stage = src;
+  Rect stage_bounds = bounds;
+  if (!filter->GetInputs().empty() && filter->GetInputs()[0] != nullptr) {
+    stage = ApplyFilterNode(As_IFB(filter->GetInputs()[0]), stage, stage_bounds,
+                            stage_bounds);
+  }
+  const std::shared_ptr<Pixmap> node_src = stage;
+  const Rect& node_bounds = stage_bounds;
+  switch (filter->GetType()) {
+    case ImageFilterType::kBlur: {
+      const auto* blur = static_cast<const BlurImageFilter*>(filter);
+      const float radius =
+          std::round(std::max(blur->GetRadiusX(), blur->GetRadiusY()));
+      // SWStackBlur cannot grow its support: draw the content layer into a
+      // padded layer first (the content centered under the halo).
+      Rect padded = ImageFilterBase::ApproximateFilteredBounds(node_bounds,
+                                                               radius, radius);
+      out_bounds = padded;
+      auto dst = MakeLayerPixmap(static_cast<uint32_t>(padded.Width()),
+                                 static_cast<uint32_t>(padded.Height()), space);
+      Bitmap dst_bitmap(dst, false);
+      auto pad_canvas = Canvas::MakeSoftwareCanvas(&dst_bitmap);
+      pad_canvas->Translate(-padded.Left(), -padded.Top());
+      pad_canvas->DrawImage(Image::MakeImage(node_src), node_bounds, nullptr);
+      auto stage =
+          MakeLayerPixmap(dst_bitmap.Width(), dst_bitmap.Height(), space);
+      Bitmap stage_bitmap(stage, false);
+      SWStackBlur(&dst_bitmap, &stage_bitmap, radius).Blur();
+      return stage;
+    }
+    case ImageFilterType::kDropShadow:
+      return ApplyDropShadowNode(
+          static_cast<const DropShadowImageFilter*>(filter), node_src,
+          node_bounds, out_bounds);
+    case ImageFilterType::kMatix: {
+      const auto* matrix_filter = static_cast<const MatrixImageFilter*>(filter);
+      Rect mapped;
+      matrix_filter->GetMatrix().MapRect(&mapped, node_bounds);
+      out_bounds = ImageFilterBase::ApproximateFilteredBounds(mapped, 0, 0);
+
+      auto dst =
+          MakeLayerPixmap(static_cast<uint32_t>(out_bounds.Width()),
+                          static_cast<uint32_t>(out_bounds.Height()), space);
+      Bitmap dst_bitmap(dst, false);
+      auto canvas = Canvas::MakeSoftwareCanvas(&dst_bitmap);
+      canvas->Translate(-out_bounds.Left(), -out_bounds.Top());
+      canvas->Concat(matrix_filter->GetMatrix());
+      canvas->DrawImage(Image::MakeImage(node_src), node_bounds, nullptr);
+      return dst;
+    }
+    case ImageFilterType::kColorFilter: {
+      const auto* filter_filter =
+          static_cast<const ColorFilterImageFilter*>(filter);
+      out_bounds = bounds;
+      auto dst = MakeLayerPixmap(node_src->Width(), node_src->Height(), space);
+      Bitmap src_bitmap(src, false);
+      Bitmap dst_bitmap(dst, false);
+      // A declared blend color resolves into the layer space first - the
+      // same rule GenerateBrush applies to paint color filters (the CPU
+      // filter quantizes at construction, without a target context).
+      auto color_filter = filter_filter->GetColorFilter();
+      auto* base = As_CFB(color_filter.get());
+      if (base->GetType() == ColorFilterType::kBlend) {
+        auto* blend = static_cast<BlendColorFilter*>(base);
+        if (!ColorSpaceEquals(blend->GetColorSpace(), space)) {
+          Color4f resolved = blend->GetColor4f();
+          auto steps =
+              ColorTransformSteps::Resolve(blend->GetColorSpace(), space);
+          if (!steps.IsNoop()) {
+            resolved = steps.Apply(resolved);
+          }
+          color_filter =
+              ColorFilters::Blend(resolved, blend->GetBlendMode(), nullptr);
+        }
+      }
+      for (size_t y = 0; y < src_bitmap.Height(); ++y) {
+        for (size_t x = 0; x < src_bitmap.Width(); ++x) {
+          dst_bitmap.SetPixel(x, y,
+                              As_CFB(color_filter.get())
+                                  ->OnFilterColor(src_bitmap.GetPixel(x, y)));
+        }
+      }
+      return dst;
+    }
+    case ImageFilterType::kCompose: {
+      const auto* compose = static_cast<const ComposeImageFilter*>(filter);
+      const auto& outer = compose->GetOuter();
+      const auto& inner = compose->GetInner();
+      auto stage = src;
+      Rect stage_bounds = bounds;
+      if (inner) {
+        stage = ApplyFilterNode(As_IFB(inner.get()), stage, stage_bounds,
+                                stage_bounds);
+      }
+      if (outer) {
+        stage = ApplyFilterNode(As_IFB(outer.get()), stage, stage_bounds,
+                                out_bounds);
+      } else {
+        out_bounds = stage_bounds;
+      }
+      return stage;
+    }
+    default:
+      out_bounds = bounds;
+      return src;
+  }
+}
+
+}  // namespace
+
 // static
 void ImageFilterBase::BlurBitmapToCanvas(Canvas* canvas, Bitmap& bitmap,
                                          const Rect& filter_bounds,
@@ -244,9 +444,12 @@ void ImageFilterBase::FlattenToBuffer(WriteBuffer& buffer) const {
 
 void BlurImageFilter::OnFilter(Canvas* canvas, Bitmap& bitmap,
                                const Rect& filter_bounds,
+                               const Rect& content_bounds,
                                const Paint& paint) const {
-  BlurBitmapToCanvas(canvas, bitmap, filter_bounds, paint, radius_x_,
-                     radius_y_);
+  Rect out_bounds;
+  auto dst =
+      ApplyFilterNode(this, bitmap.GetPixmap(), content_bounds, out_bounds);
+  canvas->DrawImage(Image::MakeImage(dst), out_bounds, &paint);
 }
 
 std::string_view BlurImageFilter::ProcName() const {
@@ -265,46 +468,12 @@ void BlurImageFilter::FlattenToBuffer(WriteBuffer& buffer) const {
 
 void DropShadowImageFilter::OnFilter(Canvas* canvas, Bitmap& bitmap,
                                      const Rect& filter_bounds,
+                                     const Rect& content_bounds,
                                      const Paint& paint) const {
-  Bitmap filtered_bitmap(bitmap.Width(), bitmap.Height(),
-                         AlphaType::kPremul_AlphaType);
-  // The tinted mask carries the layer's space; without the tag the blit
-  // back to the target would re-interpret (and re-convert) the pixels.
-  filtered_bitmap.GetPixmap()->SetColorInfo(
-      AlphaType::kPremul_AlphaType, ColorType::kRGBA,
-      bitmap.GetPixmap()->GetColorSpace());
-  SWStackBlur(&bitmap, &filtered_bitmap,
-              std::round(std::max(radius_x_, radius_y_)))
-      .Blur();
-
-  // Resolve the declared shadow color into the layer's space exactly like
-  // the image decode path (BitmapSampler::GetColor): transform in the
-  // unpremultiplied domain, quantize (which also clamps out-of-gamut
-  // channels), then premultiply - and finally scale by the mask coverage
-  // so a semi-transparent declared color survives the tint.
-  Color4f resolved = color_;
-  auto steps = ColorTransformSteps::Resolve(
-      color_space_, bitmap.GetPixmap()->GetColorSpace());
-  if (!steps.IsNoop()) {
-    resolved = steps.Apply(resolved);
-  }
-  const Color shadow_color = ColorToPMColor(Color4fToColor(resolved));
-
-  for (size_t y = 0; y < bitmap.Height(); ++y) {
-    for (size_t x = 0; x < bitmap.Width(); ++x) {
-      auto a = ColorGetA(filtered_bitmap.GetPixel(x, y));
-      auto c = a > 0 ? AlphaMulQ(shadow_color, a) : Color_TRANSPARENT;
-      filtered_bitmap.SetPixel(x, y, c);
-    }
-  }
-
-  Rect offset_bounds = filter_bounds;
-  offset_bounds.Offset(GetOffsetX(), GetOffsetY());
-  canvas->DrawImage(Image::MakeImage(filtered_bitmap.GetPixmap()),
-                    offset_bounds, &paint);
-
-  canvas->DrawImage(Image::MakeImage(bitmap.GetPixmap()), filter_bounds,
-                    &paint);
+  Rect out_bounds;
+  auto dst =
+      ApplyFilterNode(this, bitmap.GetPixmap(), content_bounds, out_bounds);
+  canvas->DrawImage(Image::MakeImage(dst), out_bounds, &paint);
 }
 
 std::string_view DropShadowImageFilter::ProcName() const {
@@ -399,6 +568,7 @@ static void morph(const PMColor* src, PMColor* dst, int radius, int width,
 
 void MorphologyImageFilter::OnFilter(Canvas* canvas, Bitmap& bitmap,
                                      const Rect& filter_bounds,
+                                     const Rect& content_bounds,
                                      const Paint& paint) const {
   Bitmap filtered_bitmap(filter_bounds.Width(), filter_bounds.Height());
 
@@ -435,6 +605,36 @@ void MorphologyImageFilter::OnFilter(Canvas* canvas, Bitmap& bitmap,
 
   canvas->DrawImage(Image::MakeImage(filtered_bitmap.GetPixmap()),
                     filter_bounds, &paint);
+}
+
+void MatrixImageFilter::OnFilter(Canvas* canvas, Bitmap& bitmap,
+                                 const Rect& filter_bounds,
+                                 const Rect& content_bounds,
+                                 const Paint& paint) const {
+  Rect out_bounds;
+  auto dst =
+      ApplyFilterNode(this, bitmap.GetPixmap(), content_bounds, out_bounds);
+  canvas->DrawImage(Image::MakeImage(dst), out_bounds, &paint);
+}
+
+void ColorFilterImageFilter::OnFilter(Canvas* canvas, Bitmap& bitmap,
+                                      const Rect& filter_bounds,
+                                      const Rect& content_bounds,
+                                      const Paint& paint) const {
+  Rect out_bounds;
+  auto dst =
+      ApplyFilterNode(this, bitmap.GetPixmap(), content_bounds, out_bounds);
+  canvas->DrawImage(Image::MakeImage(dst), out_bounds, &paint);
+}
+
+void ComposeImageFilter::OnFilter(Canvas* canvas, Bitmap& bitmap,
+                                  const Rect& filter_bounds,
+                                  const Rect& content_bounds,
+                                  const Paint& paint) const {
+  Rect out_bounds;
+  auto dst =
+      ApplyFilterNode(this, bitmap.GetPixmap(), content_bounds, out_bounds);
+  canvas->DrawImage(Image::MakeImage(dst), out_bounds, &paint);
 }
 
 #endif

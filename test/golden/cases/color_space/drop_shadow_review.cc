@@ -165,13 +165,6 @@ TEST(ColorSpaceDropShadowGPU, LegacyShadowRidesIntoP3Target) {
 // sRGB-converted extended-range floats).
 TEST(ColorSpaceDropShadowIO, RoundTripPreservesDeclaredShadowOnP3Target) {
   ASSERT_NE(skity::testing::GoldenTestEnv::GetInstance(), nullptr);
-  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
-      skity::testing::Backend::kSoftware) {
-    // The wire form is a Matrix > ColorFilter(Blend) > Blur nesting and the
-    // software renderer only implements the Blur/DropShadow leaves; the
-    // nested composition replays as a no-op until those CPU paths land.
-    GTEST_SKIP() << "Nested image filters have no CPU execution yet";
-  }
   const skity::Color4f p3_red{1.f, 0.f, 0.f, 1.f};
   auto filter = skity::ImageFilters::DropShadow(
       32, 0, 3, 3, p3_red, nullptr,
@@ -207,8 +200,16 @@ TEST(ColorSpaceDropShadowIO, RoundTripPreservesDeclaredShadowOnP3Target) {
   skity::Bitmap bitmap(pixmap);
   auto direct = bitmap.GetPixel(48, 32);
   auto round_trip = bitmap.GetPixel(112, 32);
-  // P3 red declared and replayed on a P3 target stays pure red.
-  EXPECT_EQ(direct, skity::Color_RED);
+  // P3 red declared and replayed on a P3 target stays pure red. The
+  // software stack blur quantizes the mask interior to ~254, so the exact
+  // check stays on GPU backends and software tolerates one lsb.
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    EXPECT_NEAR(ColorGetR(direct), 255, 1);
+    EXPECT_NEAR(ColorGetA(direct), 255, 1);
+  } else {
+    EXPECT_EQ(direct, skity::Color_RED);
+  }
   ExpectRGBA(round_trip, direct, 2);
 }
 
