@@ -865,6 +865,27 @@ bounds**(过滤器自己长输出;image filter 的 bounds 走多态
 layer 直接折叠),软件 layer 是局部矩阵坐标系,属独立的 layer-matrix
 语义对齐工作。**终态:全量 166 过 / 0 败 / 144 跳,allowlist 114/114,
 golden-text 2/2**;嵌套 filter 族 5 个 skip 全部解除。
+
+### 各向异性 blur + 设备对齐 layer(2026-11-26,commit c2d525a6)
+
+- **各向异性 stack blur**:`SWStackBlur` 拆 H/V 两遍各用 radius_x/y
+  (radius≤1 的遍为恒等,H 遍仍拷贝保证下游读到行)。核的 pad 按各向
+  半径;`BlurFilter_10_5` 对 GPU 基线的差减半(6452→2840px,max 40→
+  12/255),`BlurFilter_10_0` 不再纵向糊。教训:此前 `max(rx,ry)` 折叠
+  是把各向异性 case(10_5/10_0)录进 `_sw` 的原因之一,修后两个基线
+  重录且 GPU 基线距离显著缩短;
+- **设备对齐 layer 模型**(解锁 `FailedSaveLayerPreservesMatrix`,
+  共享断言直接过):layer canvas 经完整 CTM 渲染(layer 像素=设备
+  对齐,GPU layer 纹理同构),合成 ResetMatrix 后 1:1 blit 到
+  `rel_bounds`(设备矩形),不再二次乘 CTM;layer bitmap 分配失败
+  (退化巨 bounds)时回退直绘 target(GPU 的 failed-layer 路径)。
+  **两个坑**:①合成期间的 Save/Restore 对会递归 OnLayerRestore
+  (saved state 带 has_layer)——改 SetMatrix 存恢;②`IsDrawingLayer`
+  的 shader 快路径**丢弃 dst translate**(只匹配旧模型 dst.l=0 的
+  layer 局部合成矩形)——合成移出该标志外。ThreeCircle/
+  TwoCircleWithTranslate 因合成重采样微变重录 `_sw`(max 1% 舍入族)。
+- **终态:全量 167 过 / 0 败 / 143 跳,allowlist 115/115,
+  golden-text 2/2**。143 个 skip 全部为 GPU 管线专属(已逐类登记)。
 另:stack blur mask 内部覆盖 ~254(非精确 255),是 `EXPECT_EQ(direct,
 Color_RED)` 类精确断言在软件下的固有 1 值差来源。
 
