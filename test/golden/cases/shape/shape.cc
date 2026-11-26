@@ -10,6 +10,7 @@
 #include <skity/skity.hpp>
 
 #include "common/golden_test_check.hpp"
+#include "common/golden_test_env.hpp"
 #include "handle.hpp"
 
 static const char* kGoldenTestImageDir = CASE_DIR;
@@ -53,6 +54,11 @@ bool CompareShapeGolden(skity::PictureRecorder& recorder, uint32_t width,
 
 void TestCoverageAAConflationCorrectionTriangleRect(
     skity::Path::PathFillType fill_type) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    GTEST_SKIP()
+        << "Conflation correction belongs to the GPU coverage-AA pipeline";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(256.f, 256.f));
   auto canvas = recorder.GetRecordingCanvas();
@@ -171,6 +177,11 @@ TEST(ShapeGolden, CatHeadPath) {
 }
 
 TEST(ShapeGolden, StrokeDepthOverlap) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // Exact stencil+color overlap checks against GPU tessellation variants.
+    GTEST_SKIP() << "GPU stencil overlap paths are not software paths";
+  }
   // These baselines are captured from the stencil + color implementation.
   // Keep exact comparison: a second blend in an overlap is a regression.
   for (bool gpu_tessellation : {false, true}) {
@@ -790,12 +801,17 @@ TEST(ShapeGolden, CanonicalEdgesExact) {
           .cpu_tess_path = context.expected_path.c_str(),
           .gpu_tess_path = context.expected_path.c_str()}));
 
-  skity::testing::GoldenTestEnvConfig config;
-  config.enable_coverage_aa = true;
-  config.sample_count = 1;
-  config.require_exact_pixel_match = true;
-  EXPECT_TRUE(skity::testing::CompareGoldenTexture(
-      dl.get(), 192, 144, context.coverage_aa_path.c_str(), config));
+  // The exact-match leg checks the GPU coverage-AA pipeline bit-for-bit;
+  // the shared-baseline leg above already covers the software raster.
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() !=
+      skity::testing::Backend::kSoftware) {
+    skity::testing::GoldenTestEnvConfig config;
+    config.enable_coverage_aa = true;
+    config.sample_count = 1;
+    config.require_exact_pixel_match = true;
+    EXPECT_TRUE(skity::testing::CompareGoldenTexture(
+        dl.get(), 192, 144, context.coverage_aa_path.c_str(), config));
+  }
 }
 
 TEST(ShapeGolden, CoverageAAConflationCorrectionTriangleRect) {

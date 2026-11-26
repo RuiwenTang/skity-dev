@@ -404,25 +404,31 @@ TEST(SimpleShapeGolden, DrawStrokeRRectBlending) {
       {.cpu_tess_path = context.expected_image_cpu_tess_path.c_str(),
        .gpu_tess_path = context.expected_image_gpu_tess_path.c_str()}));
 
-  skity::testing::GoldenTestEnvConfig config;
-  config.sample_count = 1;
+  // The contour/simple/coverage legs toggle GPU pipelines the software
+  // backend does not have; the shared baseline above covers it.
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() !=
+      skity::testing::Backend::kSoftware) {
+    skity::testing::GoldenTestEnvConfig config;
+    config.sample_count = 1;
 
-  std::filesystem::path contour_path(CASE_DIR "contour_aa_images/");
-  contour_path.append("draw_stroke_rect_with_blending.png");
-  config.enable_contour_aa = true;
-  EXPECT_TRUE(skity::testing::CompareGoldenTexture(
-      dl.get(), 400, 400, contour_path.c_str(), config));
+    std::filesystem::path contour_path(CASE_DIR "contour_aa_images/");
+    contour_path.append("draw_stroke_rect_with_blending.png");
+    config.enable_contour_aa = true;
+    EXPECT_TRUE(skity::testing::CompareGoldenTexture(
+        dl.get(), 400, 400, contour_path.c_str(), config));
 
-  config.enable_contour_aa = false;
-  config.enable_simple_shape_pipeline = true;
-  EXPECT_TRUE(skity::testing::CompareGoldenTexture(
-      dl.get(), 400, 400, context.expected_image_simple_path.c_str(), config));
+    config.enable_contour_aa = false;
+    config.enable_simple_shape_pipeline = true;
+    EXPECT_TRUE(skity::testing::CompareGoldenTexture(
+        dl.get(), 400, 400, context.expected_image_simple_path.c_str(),
+        config));
 
-  config.enable_simple_shape_pipeline = false;
-  config.enable_coverage_aa = true;
-  EXPECT_TRUE(skity::testing::CompareGoldenTexture(
-      dl.get(), 400, 400, context.expected_image_coverage_aa_path.c_str(),
-      config));
+    config.enable_simple_shape_pipeline = false;
+    config.enable_coverage_aa = true;
+    EXPECT_TRUE(skity::testing::CompareGoldenTexture(
+        dl.get(), 400, 400, context.expected_image_coverage_aa_path.c_str(),
+        config));
+  }
 }
 
 TEST(SimpleShapeGolden, CoverageAwareBlendModes) {
@@ -528,27 +534,33 @@ TEST(SimpleShapeGolden, PlusWithPartialCoverage) {
 
   auto dl = recorder.FinishRecording();
   PathListContext context("plus_with_partial_coverage.png");
-  skity::testing::GoldenTestEnvConfig config;
-  config.sample_count = 1;
+  // The contour/simple/coverage legs toggle GPU pipelines the software
+  // backend does not have; the shared baseline above covers it.
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() !=
+      skity::testing::Backend::kSoftware) {
+    skity::testing::GoldenTestEnvConfig config;
+    config.sample_count = 1;
 
-  std::filesystem::path contour_path(CASE_DIR "contour_aa_images/");
-  contour_path.append("plus_with_partial_coverage.png");
-  config.enable_contour_aa = true;
-  config.use_backend_specific_golden = true;
-  EXPECT_TRUE(skity::testing::CompareGoldenTexture(
-      dl.get(), 200, 200, contour_path.c_str(), config));
+    std::filesystem::path contour_path(CASE_DIR "contour_aa_images/");
+    contour_path.append("plus_with_partial_coverage.png");
+    config.enable_contour_aa = true;
+    config.use_backend_specific_golden = true;
+    EXPECT_TRUE(skity::testing::CompareGoldenTexture(
+        dl.get(), 200, 200, contour_path.c_str(), config));
 
-  config.enable_contour_aa = false;
-  config.use_backend_specific_golden = false;
-  config.enable_coverage_aa = true;
-  EXPECT_TRUE(skity::testing::CompareGoldenTexture(
-      dl.get(), 200, 200, context.expected_image_coverage_aa_path.c_str(),
-      config));
+    config.enable_contour_aa = false;
+    config.use_backend_specific_golden = false;
+    config.enable_coverage_aa = true;
+    EXPECT_TRUE(skity::testing::CompareGoldenTexture(
+        dl.get(), 200, 200, context.expected_image_coverage_aa_path.c_str(),
+        config));
 
-  config.enable_coverage_aa = false;
-  config.enable_simple_shape_pipeline = true;
-  EXPECT_TRUE(skity::testing::CompareGoldenTexture(
-      dl.get(), 200, 200, context.expected_image_simple_path.c_str(), config));
+    config.enable_coverage_aa = false;
+    config.enable_simple_shape_pipeline = true;
+    EXPECT_TRUE(skity::testing::CompareGoldenTexture(
+        dl.get(), 200, 200, context.expected_image_simple_path.c_str(),
+        config));
+  }
 }
 
 // https://dev.w3.org/SVG/tools/svgweb/samples/svg-files/yinyang.svg
@@ -991,6 +1003,11 @@ TEST(SimpleShapeGolden, RRectRegionBoundaryDoesNotBecomeOpaque) {
 // A 45-degree rotation used to cancel one component of the local AA outset,
 // clipping coverage on two opposite edges despite anti-aliasing being enabled.
 TEST(SimpleShapeGolden, FilledRRect45DegreeAAEdges) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // Bit-exact check of the GPU simple-shape pipeline's analytic AA edges.
+    GTEST_SKIP() << "Tests the GPU simple shape pipeline";
+  }
   skity::testing::GoldenTestEnvConfig config;
   config.enable_simple_shape_pipeline = true;
   config.sample_count = 1;

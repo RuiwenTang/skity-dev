@@ -8,6 +8,7 @@
 #include <skity/recorder/picture_recorder.hpp>
 
 #include "common/golden_test_check.hpp"
+#include "common/golden_test_env.hpp"
 
 static const char* kGoldenTestImageDir = CASE_DIR;
 static const char* kGoldenTestCoverageAAImageDir =
@@ -30,6 +31,13 @@ bool CompareRecorderGolden(skity::DisplayList* display_list,
   };
   bool result = skity::testing::CompareGoldenTexture(
       256, 256, golden_path.c_str(), render);
+
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // The coverage-AA leg re-renders the same scene through a GPU pipeline
+    // toggle the software backend does not have.
+    return result;
+  }
 
   skity::testing::GoldenTestEnvConfig coverage_aa_config;
   coverage_aa_config.enable_coverage_aa = true;

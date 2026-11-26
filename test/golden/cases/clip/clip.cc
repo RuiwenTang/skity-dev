@@ -8,6 +8,7 @@
 #include <skity/recorder/picture_recorder.hpp>
 
 #include "common/golden_test_check.hpp"
+#include "common/golden_test_env.hpp"
 
 static const char* kGoldenTestImageDir = CASE_DIR;
 static const char* kGoldenTestCoverageAAImageDir =
@@ -77,6 +78,10 @@ skity::Path MakeCoverageAATriangle() {
 }  // namespace
 
 TEST(CoverageAACoordinatesGolden, ClipUsesGlobalBounds) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Baseline belongs to the GPU coverage-AA pipeline";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(220.f, 180.f));
   auto canvas = recorder.GetRecordingCanvas();

@@ -33,6 +33,11 @@ std::filesystem::path CoverageAAGoldenPath(const char* name) {
 }  // namespace
 
 TEST(SaveLayerGolden, TextureCopyPreservesTransformedLayerContents) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // Exact texture-copy layer compositing on sample-count variants.
+    GTEST_SKIP() << "GPU texture-copy legs are not software paths";
+  }
   const skity::Matrix transforms[] = {
       skity::Matrix{}, skity::Matrix::Translate(140.f, 140.f),
       skity::Matrix::Translate(210.f, 20.f) *
