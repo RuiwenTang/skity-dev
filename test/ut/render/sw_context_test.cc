@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cstdint>
-
 #include <skity/effect/shader.hpp>
 #include <skity/graphic/bitmap.hpp>
 #include <skity/graphic/color.hpp>
@@ -65,7 +64,8 @@ void DrawContextScene(skity::Canvas* canvas) {
                                             skity::TileMode::kClamp, 0));
   canvas->DrawRect(skity::Rect::MakeXYWH(2.f, 2.f, 92.f, 68.f), paint);
 
-  canvas->SaveLayer(skity::Rect::MakeXYWH(8.f, 8.f, 80.f, 56.f), skity::Paint{});
+  canvas->SaveLayer(skity::Rect::MakeXYWH(8.f, 8.f, 80.f, 56.f),
+                    skity::Paint{});
   const skity::Vec4 rad_colors[] = {
       skity::Vec4{1.f, 1.f, 1.f, 1.f},
       skity::Vec4{0.f, 0.f, 0.f, 0.5f},
