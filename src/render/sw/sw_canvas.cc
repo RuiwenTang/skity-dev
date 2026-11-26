@@ -19,6 +19,7 @@
 #ifdef SKITY_SW_ACCEL
 #include "src/render/sw/accel/sw_accel.hpp"
 #endif
+#include "src/effect/gradient_fallback.hpp"
 #include "src/effect/image_filter_base.hpp"
 #include "src/effect/mask_filter_priv.hpp"
 #include "src/effect/pixmap_shader.hpp"
@@ -760,6 +761,13 @@ std::unique_ptr<SWSpanBrush> SWCanvas::GenerateBrush(
 
     if (type == Shader::kLinear || type == Shader::kRadial ||
         type == Shader::kConical || type == Shader::kSweep) {
+      Color4f fallback_color;
+      if (NeedsFallbackToSolidColor(type, info, fallback_color)) {
+        fallback_color.a *= paint.GetAlphaF();
+        return std::make_unique<SolidColorBrush>(
+            spans, bitmap_, paint.GetColorFilter().get(), paint.GetBlendMode(),
+            fallback_color);
+      }
       Matrix device_to_local;
       shader->GetLocalMatrix().Invert(&device_to_local);
 
