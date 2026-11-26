@@ -669,6 +669,63 @@ bilinear 上做过一次,成本收益不成立)。
   即软绘直接对 GPU 交叉验收的先例——M3-2 交叉容差设施的第一块拼图
   已在 main 落地一例(逐 case 手工形态)。
 
+### M3-0 记录(2026-11-26,全量摸底)
+
+绕过 allowlist(`GTEST_FILTER` 环境变量使 `golden_test.cc` 不套默认清单)把
+shape 二进制全部 310 case 在 software 后端跑通,归因分类后按类处置。
+
+**本轮交付**:
+- **崩溃修复**:`RectGeometryGolden`(5 case)与 `ColorSpaceCoreReviewGPU`
+  (4 case)在 helper 里解引用 `GetGPUContext()==nullptr` 直接 SIGSEGV——
+  均为 GPU 管线专属测试(rect-batch/MSAA/P3 snapshot),TEST 体加
+  software skip guard;注意 `GTEST_SKIP` 是 **return 语义不是异常**,
+  有返回值的 helper 无法承载(第一版编译错误),guard 必须落在 TEST 体或
+  void 函数内;
+- **GPU 机制 helper guard**(blend_mode 6 处):TextureCopy/SaveLayer
+  TextureCopy/ImageFilterSaveLayerTextureCopy/ClipReplay/RestoredClipPath/
+  SaveLayerClipReplay——config 强制的 GPU capability tier 在 software 下
+  no-op,测不到任何东西,统一 skip;`NativeBlend_/FramebufferFetch_` 系列
+  已有 cap guard 自动 skip;
+- **15 个基础 blend 模式 `_sw` 基线**(Modulate/Overlay/…/Luminosity)+
+  allowlist 扩容:**软件 golden 42 → 57 case 全绿**。归因:面板构图 =
+  红圆(r=30)+ 蓝矩形直接混合,~150px 差全部落在圆周 AA 边缘带(解析
+  AA vs GPU MSAA 覆盖差穿透进混合结果,15 模式等差分布 130-165px 互相
+  印证),与 Screen 的 main 先例同机制;`SaveLayer_` 系列(隔离后
+  SrcOver 合成)无需 `_sw` 直接过 GPU 基线;
+- 摸底终态:**310 case = 104 过 / 70 失败 / 136 跳过**,全量串跑无跨
+  case 状态污染(逐 suite 二分验证)。
+
+**剩余 70 失败的四层归因(M3-1 待办清单)**:
+1. **第 0 层:0px diff 但断言失败(9 case)**——`StrokeDepthOverlap`、
+   `FilledRRect45DegreeAAEdges`、`TextureCopyPreservesTransformedLayer
+   Contents`、`P3TargetSaveLayerComposite`、`DeclaredBlendFilterColor
+   ResolvesIntoTarget`(blend filter 色彩解析差 12/255)、
+   `DeclaredShadowMatchesImageOnSRGBTarget`(**阴影颜色差 127/255**)、
+   `RoundTripPreservesDeclaredShadowOnP3Target`、`FailedSaveLayer
+   PreservesMatrix`、`NearSingularDrawPaintPreservesShaderCoordinates`。
+   测试内数值断言而非像素比对——**软绘色彩空间/阴影/矩阵保持管线的真实
+   差距**,优先深挖(修 bug,不是录基线);
+2. **第 1 层:≤500px AA 边缘带(~25 case)**——描边/rrect/curve/checker
+   类(`StrokeJoinAndCap` 1310、`CatHeadPath` 1355、`ClipRect` 1847、
+   Recorder CullRect 系列等):解析 AA vs MSAA 边缘覆盖差,机制同
+   blend 面板,批量目检抽验后录 `_sw`;
+3. **第 2 层:500-8000px 混合(~15 case)**——`ClipPath` 3544(max 65%)、
+   `CoverageAwareBlendModes` 7995、`DrawYinAndYang` 3255 等:量级超出
+   边缘带解释范围,逐个看 diff 图归因(部分可能是 conflation/覆盖累计
+   语义差,部分可能挂 `_sw`);
+4. **第 3 层:>10000px 或 max 100%(11 case)**——`Tiger` 55929、
+   `FallbackPathAndRRect` 44408、`TwoCircleWithTranslate` 31962、Blur
+   系列 5 个(stack blur vs GPU 两遍模糊的实现差)、`RadialGradient
+   Flags` 30184(max 25%)、`LinearGradientWithColorStops` 16276。
+   渐变两个疑似色彩空间插值路径差距(与第 0 层 ColorSpace 断言失败
+   同族),blur 系列大概率登记实现差异 + `_sw`。
+
+**方法论(本轮教训)**:stdout 的 `GOLDEN_TEST_FAILED_METRICS` 解析必须
+按"**最后一个** `test name:` 行"归属——正则 `test name:.*?METRICS` 的
+非贪婪跨测试串位曾误报 8 个"全量失败/单独通过"的假阳性,引出一次
+"跨 case 污染"误判(逐 suite 二分 + JSON 权威列表复核后排除);gtest
+json 报告的 failure 列表才是权威。
+
 ## 7. 性能预期(机制推算,待 M1 实测校准)
 
 > **校准状态(2026-11)**:以下为开工前的机制推算,现在有实测锚点了。
