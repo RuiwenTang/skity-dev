@@ -149,7 +149,7 @@ RLE `Span{x,y,len,cover}`,消费端 `BrushH` 又解压回稠密 `pm_colors[]` �
   **M2-4 行直连整合** ✅(行缓冲直供消费端、梯度全 28 模式 staged
   fetch→blend、删加速态 BrushH)|
   unit + 软件 golden(`--backend=software`,已全绿)+ 分段/逐次绘制基准 |
-| M3 验收 | CPU golden 通道(DisplayList→PNG diff);与 GPU/SwiftShader ±1~2/255 交叉容差 | test-runner 增加 CPU 后端 |
+| M3 验收 ✅(2026-11-26 功能对齐完成,CI 部分推迟) | CPU golden 通道(DisplayList→PNG diff);与 GPU/SwiftShader ±1~2/255 交叉容差 | test-runner 增加 CPU 后端。**实际落地**:test-runner `--backend=software` + 软件 golden 全量 310 case **167 过 / 0 败 / 143 跳**(skip 均为已登记的 GPU 管线专属),allowlist 115 全绿;渲染器真修复 10 处(leading kDifference、DropShadow 三连、SaveLayer 空间、blend filter resolve、premul 插值域、嵌套 image filter CPU 执行、各向异性 blur、设备对齐 layer);±1~2 已知差异族全部量化登记。**交叉容差设施与 Linux SwiftShader CI job 推迟到 PR 阶段**(不提 PR 时 CI 不会跑,见 M3-0 记录的豁免清单) | test-runner 增加 CPU 后端 ✅ |
 | M4 扩展 | DisplayList band 并行、AVX-512 评估、mipmap。**mipmap 现状
   (2026-11-24 摸底):两侧均未端到端实现——GPU 采样器描述符已传
   MipmapMode(gpu_sampler.cc)但 `FindOrCreateTexture` 构造 TextureImpl
