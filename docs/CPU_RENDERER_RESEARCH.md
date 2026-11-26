@@ -886,6 +886,18 @@ golden-text 2/2**;嵌套 filter 族 5 个 skip 全部解除。
   TwoCircleWithTranslate 因合成重采样微变重录 `_sw`(max 1% 舍入族)。
 - **终态:全量 167 过 / 0 败 / 143 跳,allowlist 115/115,
   golden-text 2/2**。143 个 skip 全部为 GPU 管线专属(已逐类登记)。
+
+**宽度泛化补遗(2026-11-26,commit 6527eacd)**:审查发现内核仍残留
+**硬编码的定长栈缓冲**(src_bytes/dst_buf/color_bytes/mask_buf 的
+`[64]`、梯度 LUT gather 表与图像 bilinear tap 表的 `[16]` ×14 处)——
+循环上限全部按 `Lanes()` 参数化,启用目标集(≤512-bit,HWY_MAX_BYTES
+== 64)下行为正确,但更宽目标会静默栈溢出。已统一改为
+`HWY_MAX_BYTES` / `HWY_MAX_BYTES/4` 尺寸。结论修正:M1b 宽度泛化
+记录中"钉死宽度的只有 tag/表/定长数组"的最后一项至此消除;
+`LowerHalf/UpperHalf+PromoteTo/Combine` 的 half 拆分是 u8→u16 展开
+的结构性形态(非 128-bit 假设),`BroadcastLaneByte` 依赖的是
+TableLookupBytes 的 128-bit **lane 局部性**(4B 像素不跨 lane,任意
+总宽成立)。
 另:stack blur mask 内部覆盖 ~254(非精确 255),是 `EXPECT_EQ(direct,
 Color_RED)` 类精确断言在软件下的固有 1 值差来源。
 
