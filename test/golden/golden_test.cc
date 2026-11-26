@@ -15,6 +15,14 @@ namespace {
 // Add shared cases as they are validated on the software backend.
 constexpr char kSoftwareGoldenFilter[] =
     "BlendModeGolden.Screen:"
+    "BlendModeGolden.Modulate:"
+    "BlendModeGolden.Overlay:BlendModeGolden.Darken:"
+    "BlendModeGolden.Lighten:BlendModeGolden.ColorDodge:"
+    "BlendModeGolden.ColorBurn:BlendModeGolden.HardLight:"
+    "BlendModeGolden.SoftLight:BlendModeGolden.Difference:"
+    "BlendModeGolden.Exclusion:BlendModeGolden.Multiply:"
+    "BlendModeGolden.Hue:BlendModeGolden.Saturation:"
+    "BlendModeGolden.Color:BlendModeGolden.Luminosity:"
     "ColorSpaceGolden.DisplayP3TargetDecodeBaseline:"
     "ColorSpaceGolden.P3TargetSpaceImagePassthrough:"
     "ColorSpaceGolden.P3TargetSpacePaintColor:"

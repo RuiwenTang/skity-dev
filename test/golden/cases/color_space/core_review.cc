@@ -28,14 +28,17 @@ class ScopedTarget {
       : env_(env),
         space_(env->GetTargetColorSpace()),
         samples_(env->GetSampleCount()),
-        contour_aa_(env->GetGPUContext()->IsEnableContourAA()) {
+        contour_aa_(env->GetGPUContext() != nullptr &&
+                    env->GetGPUContext()->IsEnableContourAA()) {
     env_->SetTargetColorSpace(std::move(space));
     env_->SetSampleCount(1);
   }
   ~ScopedTarget() {
     env_->SetTargetColorSpace(space_);
     env_->SetSampleCount(samples_);
-    env_->GetGPUContext()->SetEnableContourAA(contour_aa_);
+    if (env_->GetGPUContext() != nullptr) {
+      env_->GetGPUContext()->SetEnableContourAA(contour_aa_);
+    }
   }
 
  private:
@@ -55,6 +58,9 @@ void ExpectRGBNear(skity::Color actual, skity::Color expected, int tolerance) {
 
 TEST(ColorSpaceCoreReviewGPU, SnapshotRetainsP3Space) {
   auto* env = skity::testing::GoldenTestEnv::GetInstance();
+  if (env->GetBackend() == skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Drives the GPU context directly";
+  }
   ASSERT_NE(env, nullptr);
   ScopedTarget scope(env, skity::ColorSpace::DisplayP3());
   auto* context = env->GetGPUContext();
@@ -90,6 +96,9 @@ TEST(ColorSpaceCoreReviewGPU, SnapshotRetainsP3Space) {
 
 TEST(ColorSpaceCoreReviewGPU, AAStrokePreservesRecordedColorSpace) {
   auto* env = skity::testing::GoldenTestEnv::GetInstance();
+  if (env->GetBackend() == skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Drives the GPU context directly";
+  }
   ASSERT_NE(env, nullptr);
   ScopedTarget scope(env, nullptr);
   env->GetGPUContext()->SetEnableContourAA(true);
@@ -119,6 +128,12 @@ TEST(ColorSpaceCoreReviewGPU, AAStrokePreservesRecordedColorSpace) {
 
 TEST(ColorSpaceCoreReviewGPU, BlendFilterColorUsesTargetSpace) {
   auto* env = skity::testing::GoldenTestEnv::GetInstance();
+  if (env->GetBackend() == skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Drives the GPU context directly";
+  }
+  if (env->GetBackend() == skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Drives the GPU context directly";
+  }
   ASSERT_NE(env, nullptr);
   ScopedTarget scope(env, skity::ColorSpace::SRGBLinear());
   auto texture = env->RenderToTexture(64, 64, [](skity::Canvas* canvas) {

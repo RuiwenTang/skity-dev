@@ -278,6 +278,12 @@ static skity::testing::GoldenTestEnvConfig NativeBlendConfig(
 
 static void RunBlendModeTextureCopyTest(skity::BlendMode mode, const char* name,
                                         uint32_t sample_count) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    // The config only forces GPU capability tiers; the software renderer has
+    // no texture-copy path to exercise.
+    GTEST_SKIP() << "Tests the GPU texture-copy blend path";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(100.f, 100.f));
   auto canvas = recorder.GetRecordingCanvas();
@@ -487,6 +493,10 @@ static void RunBlendModeSaveLayerTest(skity::BlendMode mode, const char* name) {
 static void RunBlendModeSaveLayerTextureCopyTest(skity::BlendMode mode,
                                                  const char* name,
                                                  uint32_t sample_count) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Tests the GPU texture-copy blend path";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(100.f, 100.f));
   auto canvas = recorder.GetRecordingCanvas();
@@ -578,6 +588,10 @@ static void DrawBlendModeImageFilterSaveLayer(skity::Canvas* canvas,
 
 static void RunBlendModeImageFilterSaveLayerTextureCopyTest(
     skity::BlendMode mode, const char* name, uint32_t sample_count) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Tests the GPU texture-copy blend path";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(100.f, 100.f));
   auto canvas = recorder.GetRecordingCanvas();
@@ -739,6 +753,10 @@ static void DrawBlendModeRestoredClipPathTextureCopy(skity::Canvas* canvas) {
 
 static void RunBlendModeClipReplayTest(
     const char* path_name, skity::testing::GoldenTestEnvConfig config) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Tests the GPU texture-copy blend path";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(128.f, 128.f));
   auto canvas = recorder.GetRecordingCanvas();
@@ -753,6 +771,10 @@ static void RunBlendModeClipReplayTest(
 
 static void RunBlendModeRestoredClipPathTextureCopyTest(
     const char* path_name, skity::testing::GoldenTestEnvConfig config) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Tests the GPU texture-copy blend path";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(128.f, 128.f));
   auto canvas = recorder.GetRecordingCanvas();
@@ -792,6 +814,10 @@ static void DrawBlendModeSaveLayerClipReplay(skity::Canvas* canvas) {
 
 static void RunBlendModeSaveLayerClipReplayTest(
     const char* path_name, skity::testing::GoldenTestEnvConfig config) {
+  if (skity::testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      skity::testing::Backend::kSoftware) {
+    GTEST_SKIP() << "Tests the GPU texture-copy blend path";
+  }
   skity::PictureRecorder recorder;
   recorder.BeginRecording(skity::Rect::MakeWH(128.f, 128.f));
   auto canvas = recorder.GetRecordingCanvas();

@@ -104,6 +104,11 @@ std::shared_ptr<Pixmap> RenderRectScene(uint32_t samples, bool merge,
 }
 
 TEST(RectGeometryGolden, AffineRectsMatchPathWithMSAA) {
+  if (testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      testing::Backend::kSoftware) {
+    // Exercises GPU batching / MSAA / analytic-AA pipeline toggles.
+    GTEST_SKIP() << "Tests the GPU rect-batch pipeline";
+  }
   const Rect rect = Rect::MakeLTRB(-5.25f, -3.75f, 11.125f, 9.25f);
   const struct {
     const char* golden_path;
@@ -158,6 +163,11 @@ TEST(RectGeometryGolden, AffineRectsMatchPathWithMSAA) {
 }
 
 TEST(RectGeometryGolden, PixelAlignedRectsWithAnalyticalAA) {
+  if (testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      testing::Backend::kSoftware) {
+    // Exercises GPU batching / MSAA / analytic-AA pipeline toggles.
+    GTEST_SKIP() << "Tests the GPU rect-batch pipeline";
+  }
   for (auto aa : {TestAA::kContour, TestAA::kCoverage}) {
     SCOPED_TRACE(aa == TestAA::kContour ? "Contour AA" : "Coverage AA");
     auto draw = [](Canvas* canvas) {
@@ -200,6 +210,11 @@ TEST(RectGeometryGolden, PixelAlignedRectsWithAnalyticalAA) {
 }
 
 TEST(RectGeometryGolden, BatchAndPathHaveTheSamePixels) {
+  if (testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      testing::Backend::kSoftware) {
+    // Exercises GPU batching / MSAA / analytic-AA pipeline toggles.
+    GTEST_SKIP() << "Tests the GPU rect-batch pipeline";
+  }
   for (uint32_t samples : {1u, 4u}) {
     SCOPED_TRACE(samples);
     auto reference = RenderRectScene(samples, false, true);
@@ -227,6 +242,11 @@ TEST(RectGeometryGolden, BatchAndPathHaveTheSamePixels) {
 }
 
 TEST(RectGeometryGolden, RectAndRRectBatchesPreserveDrawOrder) {
+  if (testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      testing::Backend::kSoftware) {
+    // Exercises GPU batching / MSAA / analytic-AA pipeline toggles.
+    GTEST_SKIP() << "Tests the GPU rect-batch pipeline";
+  }
   for (auto aa : {TestAA::kContour, TestAA::kMSAA}) {
     SCOPED_TRACE(aa == TestAA::kMSAA ? "MSAA" : "Contour AA");
     auto render = [&](bool merge) {
@@ -269,6 +289,11 @@ TEST(RectGeometryGolden, RectAndRRectBatchesPreserveDrawOrder) {
 }
 
 TEST(RectGeometryGolden, CoverageAAKeepsSharedPixelOrder) {
+  if (testing::GoldenTestEnv::GetInstance()->GetBackend() ==
+      testing::Backend::kSoftware) {
+    // Exercises GPU batching / MSAA / analytic-AA pipeline toggles.
+    GTEST_SKIP() << "Tests the GPU rect-batch pipeline";
+  }
   auto render = [](bool merge) {
     auto draw = [](Canvas* canvas) {
       Paint blue;
